@@ -15,6 +15,12 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "ゴルフ Tier 表",
   description: "友人の年間ゴルフスコアを集計し、Tier と 2 チーム分けを表示するWebアプリ",
+  viewport: {
+    width: "device-width",
+    initialScale: 1,
+    maximumScale: 1,
+    userScalable: false,
+  },
 };
 
 export default function RootLayout({

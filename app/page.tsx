@@ -515,8 +515,9 @@ export default function Home() {
                 <label className="block">
                   <span className="text-sm font-medium text-slate-700">スコア</span>
                   <input
-                    type="number"
-                    min="1"
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
                     value={newRound.score}
                     onChange={(event) => setNewRound((current) => ({ ...current, score: event.target.value }))}
                     placeholder="例: 82"
