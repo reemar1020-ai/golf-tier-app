@@ -44,34 +44,27 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function getTier(rating: number) {
-  if (rating >= 80) return "S";
-  if (rating >= 70) return "A";
-  if (rating >= 55) return "B";
-  if (rating >= 45) return "C";
+function getTier(averageScore: number | null) {
+  if (averageScore === null) return "D";
+  if (averageScore < 80) return "S";
+  if (averageScore <= 89) return "A";
+  if (averageScore <= 99) return "B";
+  if (averageScore <= 109) return "C";
   return "D";
 }
 
-function calculateRating(
-  averageScore: number | null,
-  bestScore: number | null,
-  recentAverage: number | null
-) {
+function calculateRating(averageScore: number | null) {
   if (averageScore === null) return 0;
-
-  const target = 72;
-  const averageDelta = target - averageScore;
-  const bestDelta = bestScore !== null ? averageScore - bestScore : 0;
-  const recentDelta = recentAverage !== null ? averageScore - recentAverage : 0;
-
-  const rating =
-    60 + averageDelta * 3 + bestDelta * 1.5 + recentDelta * 2;
-
-  return clamp(Math.round(rating), 0, 100);
+  return clamp(Math.round(130 - averageScore), 0, 100);
 }
 
 function buildTeamGroups(stats: MemberStats[]) {
-  const sorted = [...stats].sort((a, b) => b.rating - a.rating);
+  const sorted = [...stats].sort((a, b) => {
+    if (a.averageScore === null) return 1;
+    if (b.averageScore === null) return -1;
+    return a.averageScore - b.averageScore;
+  });
+
   const teams = { teamA: [] as MemberStats[], teamB: [] as MemberStats[] };
   const totals = { teamA: 0, teamB: 0 };
 
@@ -97,6 +90,7 @@ function buildTeamGroups(stats: MemberStats[]) {
 export default function Home() {
   const [members, setMembers] = useState<Member[]>([]);
   const [rounds, setRounds] = useState<Round[]>([]);
+  const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
   const [newMemberName, setNewMemberName] = useState("");
   const [newRound, setNewRound] = useState({
@@ -105,6 +99,7 @@ export default function Home() {
     courseName: "",
     score: "",
   });
+  const [teamsVisible, setTeamsVisible] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const stats = useMemo(() => {
@@ -135,8 +130,8 @@ export default function Home() {
             )
           : null;
 
-      const rating = calculateRating(averageScore, bestScore, recentAverage);
-      const tier = getTier(rating);
+      const rating = calculateRating(averageScore);
+      const tier = getTier(averageScore);
 
       return {
         member,
@@ -156,29 +151,38 @@ export default function Home() {
   useEffect(() => {
     async function load() {
       setLoading(true);
-      const [{ data: storedMembers, error: memberError }, { data: storedRounds, error: roundError }] =
+      const [{ data: storedMembers, error: memberError }, { data: storedRounds, error: roundError }, { data: storedSettings, error: settingsError }] =
         await Promise.all([
           supabase.from("members").select("*").order("name"),
           supabase.from("rounds").select("*").order("played_at", { ascending: false }),
+          supabase.from("settings").select("*").order("key"),
         ]);
 
       setLoading(false);
 
-      if (memberError || roundError) {
+      if (memberError || roundError || settingsError) {
         setStatusMessage("データの取得中に問題が発生しました。もう一度お試しください。");
-        console.error(memberError ?? roundError);
+        console.error(memberError ?? roundError ?? settingsError);
         return;
       }
 
       setMembers(storedMembers ?? []);
       setRounds(storedRounds ?? []);
+      setSettings(
+        (storedSettings ?? []).reduce((acc: Record<string, unknown>, row) => {
+          if (row && typeof row === "object" && "key" in row && "value" in row) {
+            acc[row.key as string] = row.value;
+          }
+          return acc;
+        }, {})
+      );
       setStatusMessage(null);
     }
 
     load();
   }, []);
 
-  async function handleAddMember(event: React.FormEvent<HTMLFormElement>) {
+  async function handleAddMember(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!newMemberName.trim()) return;
 
@@ -198,7 +202,7 @@ export default function Home() {
     setMembers(storedMembers ?? []);
   }
 
-  async function handleAddRound(event: React.FormEvent<HTMLFormElement>) {
+  async function handleAddRound(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!newRound.memberId || !newRound.playedAt || !newRound.courseName.trim() || !newRound.score.trim()) {
       return;
@@ -235,6 +239,25 @@ export default function Home() {
     setRounds(storedRounds ?? []);
   }
 
+  const tierCounts = useMemo(() => {
+    return stats.reduce(
+      (acc, stat) => {
+        acc[stat.tier] = (acc[stat.tier] ?? 0) + 1;
+        return acc;
+      },
+      { S: 0, A: 0, B: 0, C: 0, D: 0 } as Record<string, number>
+    );
+  }, [stats]);
+
+  const overallAverageScore = useMemo(() => {
+    const scores = stats
+      .map((stat) => stat.averageScore)
+      .filter((value): value is number => value !== null);
+    if (scores.length === 0) return null;
+    return Number((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1));
+  }, [stats]);
+
+  const teamGroups = useMemo(() => buildTeamGroups(stats), [stats]);
   const topStats = [...stats].sort((a, b) => b.rating - a.rating).slice(0, 5);
 
   return (
@@ -251,20 +274,42 @@ export default function Home() {
         </header>
 
         <div className="space-y-6">
-          <section id="summary" className="grid gap-4 sm:grid-cols-3">
-            <div className="overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-              <p className="text-sm text-slate-500">登録メンバー</p>
-              <p className="mt-4 text-3xl font-semibold text-slate-900">{members.length}</p>
+          <section id="summary" className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+                <p className="text-sm text-slate-500">登録メンバー</p>
+                <p className="mt-4 text-3xl font-semibold text-slate-900">{members.length}</p>
+              </div>
+              <div className="overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+                <p className="text-sm text-slate-500">平均スコア</p>
+                <p className="mt-4 text-3xl font-semibold text-slate-900">{overallAverageScore ?? "-"}</p>
+              </div>
+              <div className="overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+                <p className="text-sm text-slate-500">設定数</p>
+                <p className="mt-4 text-3xl font-semibold text-slate-900">{Object.keys(settings).length}</p>
+              </div>
+              <div className="flex flex-col justify-between overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+                <div>
+                  <p className="text-sm text-slate-500">チーム分け</p>
+                  <p className="mt-4 text-3xl font-semibold text-slate-900">{teamGroups.totals.teamA + teamGroups.totals.teamB > 0 ? teamGroups.totals.teamA + teamGroups.totals.teamB : "-"}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setTeamsVisible((visible) => !visible)}
+                  className="mt-4 inline-flex w-full items-center justify-center rounded-3xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-700"
+                >
+                  {teamsVisible ? "チームを閉じる" : "チーム分けを表示"}
+                </button>
+              </div>
             </div>
-            <div className="overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-              <p className="text-sm text-slate-500">登録ラウンド</p>
-              <p className="mt-4 text-3xl font-semibold text-slate-900">{rounds.length}</p>
-            </div>
-            <div className="overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-              <p className="text-sm text-slate-500">平均ラウンド数</p>
-              <p className="mt-4 text-3xl font-semibold text-slate-900">
-                {members.length > 0 ? (rounds.length / members.length).toFixed(1) : "0.0"}
-              </p>
+
+            <div className="grid gap-3 sm:grid-cols-5">
+              {(["S", "A", "B", "C", "D"] as const).map((tier) => (
+                <div key={tier} className="rounded-3xl bg-white p-4 text-center shadow-sm ring-1 ring-slate-200">
+                  <p className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Tier {tier}</p>
+                  <p className="mt-4 text-3xl font-semibold text-slate-900">{tierCounts[tier]}</p>
+                </div>
+              ))}
             </div>
           </section>
 
@@ -272,6 +317,51 @@ export default function Home() {
             <div className="rounded-3xl border border-emerald-300/70 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
               {statusMessage}
             </div>
+          ) : null}
+
+          {teamsVisible ? (
+            <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h2 className="text-xl font-semibold text-slate-900">チーム分け結果</h2>
+                  <p className="mt-1 text-sm text-slate-500">平均スコアに基づいて5人ずつに分けています。</p>
+                </div>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-2">
+                  <div className="rounded-3xl bg-slate-50 p-4 text-center">
+                    <p className="text-sm text-slate-500">Team A 合計</p>
+                    <p className="mt-2 text-2xl font-semibold text-slate-900">{teamGroups.totals.teamA}</p>
+                  </div>
+                  <div className="rounded-3xl bg-slate-50 p-4 text-center">
+                    <p className="text-sm text-slate-500">Team B 合計</p>
+                    <p className="mt-2 text-2xl font-semibold text-slate-900">{teamGroups.totals.teamB}</p>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                <div className="rounded-3xl bg-slate-50 p-4">
+                  <p className="text-sm font-semibold text-slate-900">Team A</p>
+                  <ul className="mt-4 space-y-2 text-slate-700">
+                    {teamGroups.teamA.map((player) => (
+                      <li key={player.member.id} className="flex items-center justify-between rounded-2xl bg-white px-3 py-2">
+                        <span>{player.member.name}</span>
+                        <span className="text-sm font-semibold text-slate-900">{player.averageScore ?? "-"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="rounded-3xl bg-slate-50 p-4">
+                  <p className="text-sm font-semibold text-slate-900">Team B</p>
+                  <ul className="mt-4 space-y-2 text-slate-700">
+                    {teamGroups.teamB.map((player) => (
+                      <li key={player.member.id} className="flex items-center justify-between rounded-2xl bg-white px-3 py-2">
+                        <span>{player.member.name}</span>
+                        <span className="text-sm font-semibold text-slate-900">{player.averageScore ?? "-"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            </section>
           ) : null}
 
           <section id="members" className="space-y-4">
