@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
@@ -20,13 +20,38 @@ type Round = {
 
 type MemberStats = {
   member: Member;
+  rounds: Round[];
   roundsCount: number;
   averageScore: number | null;
   bestScore: number | null;
   recentAverage: number | null;
+  recentThreeMonthAverage: number | null;
+  recentOneYearAverage: number | null;
   rating: number;
   tier: string;
-  rounds: Round[];
+};
+
+type RoundGroup = {
+  date: string;
+  course: string;
+  entries: Array<{
+    memberId: string;
+    memberName: string;
+    score: number;
+  }>;
+  minScore: number;
+  minMemberName: string;
+};
+
+type TabKey = "score" | "tier";
+
+type ChampionshipResult = "win" | "runner-up" | "third" | "none";
+
+type TeamSplit = {
+  teamA: MemberStats[];
+  teamB: MemberStats[];
+  totals: { teamA: number; teamB: number };
+  difference: number;
 };
 
 const defaultPlayedAt = new Date().toISOString().slice(0, 10);
@@ -40,51 +65,183 @@ function formatDate(value: string | null | undefined) {
   });
 }
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
+function getDateValue(value: string) {
+  return new Date(`${value}T00:00:00`);
 }
 
-function getTier(averageScore: number | null) {
-  if (averageScore === null) return "D";
-  if (averageScore < 80) return "S";
-  if (averageScore <= 89) return "A";
-  if (averageScore <= 99) return "B";
-  if (averageScore <= 109) return "C";
-  return "D";
-}
-
-function calculateRating(averageScore: number | null) {
-  if (averageScore === null) return 0;
-  return clamp(Math.round(130 - averageScore), 0, 100);
-}
-
-function buildTeamGroups(stats: MemberStats[]) {
-  const sorted = [...stats].sort((a, b) => {
-    if (a.averageScore === null) return 1;
-    if (b.averageScore === null) return -1;
-    return a.averageScore - b.averageScore;
+function getRecentAverage(rounds: Round[], days: number) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const recentRounds = rounds.filter((round) => {
+    const playedAt = getDateValue(round.played_at);
+    return playedAt >= cutoff;
   });
 
-  const teams = { teamA: [] as MemberStats[], teamB: [] as MemberStats[] };
-  const totals = { teamA: 0, teamB: 0 };
+  if (recentRounds.length === 0) return null;
+  const total = recentRounds.reduce((sum, round) => sum + round.score, 0);
+  return Number((total / recentRounds.length).toFixed(1));
+}
 
-  for (const stat of sorted) {
-    if (teams.teamA.length === 5) {
-      teams.teamB.push(stat);
-      totals.teamB += stat.rating;
-    } else if (teams.teamB.length === 5) {
-      teams.teamA.push(stat);
-      totals.teamA += stat.rating;
-    } else if (totals.teamA <= totals.teamB) {
-      teams.teamA.push(stat);
-      totals.teamA += stat.rating;
-    } else {
-      teams.teamB.push(stat);
-      totals.teamB += stat.rating;
-    }
+function getBestScore(rounds: Round[], days: number) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const recentRounds = rounds.filter((round) => {
+    const playedAt = getDateValue(round.played_at);
+    return playedAt >= cutoff;
+  });
+  if (recentRounds.length === 0) return null;
+  return Math.min(...recentRounds.map((round) => round.score));
+}
+
+function getScorePoints(averageScore: number | null) {
+  if (averageScore === null) return 0;
+  if (averageScore <= 79) return 200;
+  if (averageScore <= 84) return 180;
+  if (averageScore <= 89) return 160;
+  if (averageScore <= 94) return 140;
+  if (averageScore <= 99) return 120;
+  if (averageScore <= 104) return 100;
+  if (averageScore <= 109) return 80;
+  if (averageScore <= 114) return 60;
+  if (averageScore <= 119) return 40;
+  if (averageScore <= 129) return 20;
+  if (averageScore <= 139) return 10;
+  return 5;
+}
+
+function calculateTier(rating: number) {
+  if (rating >= 150) return "S";
+  if (rating >= 100) return "A";
+  if (rating >= 50) return "B";
+  return "C";
+}
+
+function calculateRating(rounds: Round[], championshipResult: ChampionshipResult) {
+  const recentThreeMonthAverage = getRecentAverage(rounds, 90);
+  const recentOneYearAverage = getRecentAverage(rounds, 365);
+  const recentBestScore = getBestScore(rounds, 365);
+
+  let points = getScorePoints(recentThreeMonthAverage);
+
+  if (
+    recentThreeMonthAverage !== null &&
+    recentBestScore !== null &&
+    recentBestScore <= recentThreeMonthAverage - 10
+  ) {
+    points += 30;
   }
 
-  return { ...teams, totals };
+  if (
+    recentThreeMonthAverage !== null &&
+    recentOneYearAverage !== null &&
+    recentThreeMonthAverage <= recentOneYearAverage - 10
+  ) {
+    points += 15;
+  }
+
+  const resultBonus =
+    championshipResult === "win"
+      ? 15
+      : championshipResult === "runner-up"
+      ? 10
+      : championshipResult === "third"
+      ? 5
+      : 0;
+
+  return points + resultBonus;
+}
+
+function groupRoundsByDateAndCourse(rounds: Round[]) {
+  const grouped = new Map<string, RoundGroup>();
+
+  rounds.forEach((round) => {
+    const key = `${round.played_at}::${round.course_name}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        date: round.played_at,
+        course: round.course_name,
+        entries: [],
+        minScore: round.score,
+        minMemberName: "",
+      });
+    }
+
+    const group = grouped.get(key)!;
+    group.entries.push({
+      memberId: round.member_id,
+      memberName: "",
+      score: round.score,
+    });
+
+    if (round.score < group.minScore) {
+      group.minScore = round.score;
+    }
+  });
+
+  return Array.from(grouped.values())
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .map((group) => ({
+      ...group,
+      entries: group.entries.sort((a, b) => a.score - b.score),
+    }));
+}
+
+function generateBalancedTeams(stats: MemberStats[]) {
+  if (stats.length === 0) {
+    return {
+      teamA: [] as MemberStats[],
+      teamB: [] as MemberStats[],
+      totals: { teamA: 0, teamB: 0 },
+      difference: 0,
+    };
+  }
+
+  const teamSize = Math.floor(stats.length / 2);
+  const members = stats.map((stat, index) => ({ stat, index }));
+  let best: TeamSplit | null = null;
+
+  const choose = (start: number, chosen: number[], currentTeam: MemberStats[]) => {
+    if (currentTeam.length === teamSize) {
+      const teamA = currentTeam;
+      const teamB = members.filter((member) => !chosen.includes(member.index)).map((member) => member.stat);
+      const totals = {
+        teamA: teamA.reduce((sum, item) => sum + item.rating, 0),
+        teamB: teamB.reduce((sum, item) => sum + item.rating, 0),
+      };
+      const difference = Math.abs(totals.teamA - totals.teamB);
+      const candidate = {
+        teamA,
+        teamB,
+        totals,
+        difference,
+      };
+
+      if (!best || candidate.difference < best.difference) {
+        best = candidate;
+      }
+      return;
+    }
+
+    for (let i = start; i < members.length; i += 1) {
+      if (chosen.includes(i)) continue;
+      chosen.push(i);
+      choose(i + 1, chosen, [...currentTeam, members[i].stat]);
+      chosen.pop();
+    }
+  };
+
+  choose(0, [], []);
+
+  if (!best) {
+    return {
+      teamA: [],
+      teamB: [],
+      totals: { teamA: 0, teamB: 0 },
+      difference: 0,
+    };
+  }
+
+  return best;
 }
 
 export default function Home() {
@@ -92,65 +249,45 @@ export default function Home() {
   const [rounds, setRounds] = useState<Round[]>([]);
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
-  const [newMemberName, setNewMemberName] = useState("");
-  const [newRound, setNewRound] = useState({
-    memberId: "",
-    playedAt: defaultPlayedAt,
-    courseName: "",
-    score: "",
-  });
-  const [teamsVisible, setTeamsVisible] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<TabKey>("score");
+  const [newMemberName, setNewMemberName] = useState("");
+  const [isMemberComposerOpen, setIsMemberComposerOpen] = useState(false);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [scoreDrafts, setScoreDrafts] = useState<Record<string, string>>({});
+  const [newRound, setNewRound] = useState({
+    courseName: "",
+    playedAt: defaultPlayedAt,
+  });
+  const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+  const [expandedDetail, setExpandedDetail] = useState<"tier" | "ranking" | "teams" | null>("tier");
+  const [selectedRankingMemberId, setSelectedRankingMemberId] = useState<string | null>(null);
+  const [teamVersion, setTeamVersion] = useState(0);
 
-  const stats = useMemo(() => {
-    return members.map((member) => {
-      const memberRounds = rounds
-        .filter((round) => round.member_id === member.id)
-        .sort((a, b) => new Date(b.played_at).getTime() - new Date(a.played_at).getTime());
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const hash = window.location.hash;
+      if (hash === "#tier") {
+        setActiveTab("tier");
+      }
+    }
+  }, []);
 
-      const scores = memberRounds.map((round) => round.score);
-      const roundsCount = memberRounds.length;
-      const averageScore =
-        scores.length > 0
-          ? Number(
-              (
-                scores.reduce((sum, score) => sum + score, 0) / scores.length
-              ).toFixed(1)
-            )
-          : null;
-      const bestScore = scores.length > 0 ? Math.min(...scores) : null;
-      const recentScores = memberRounds.slice(0, 5).map((round) => round.score);
-      const recentAverage =
-        recentScores.length > 0
-          ? Number(
-              (
-                recentScores.reduce((sum, score) => sum + score, 0) /
-                recentScores.length
-              ).toFixed(1)
-            )
-          : null;
-
-      const rating = calculateRating(averageScore);
-      const tier = getTier(averageScore);
-
-      return {
-        member,
-        roundsCount,
-        averageScore,
-        bestScore,
-        recentAverage,
-        rating,
-        tier,
-        rounds: memberRounds,
-      };
-    });
-  }, [members, rounds]);
-
-  const teams = useMemo(() => buildTeamGroups(stats), [stats]);
+  useEffect(() => {
+    if (members.length > 0 && (selectedMemberIds.length === 0 || selectedMemberIds.some((id) => !members.some((member) => member.id === id)))) {
+      setSelectedMemberIds(members.map((member) => member.id));
+    }
+  }, [members, selectedMemberIds]);
 
   useEffect(() => {
     async function load() {
       setLoading(true);
+      if (!supabase) {
+        setLoading(false);
+        setStatusMessage("Supabaseの接続設定が未設定のため、データ読み込みできません。");
+        return;
+      }
+
       const [{ data: storedMembers, error: memberError }, { data: storedRounds, error: roundError }, { data: storedSettings, error: settingsError }] =
         await Promise.all([
           supabase.from("members").select("*").order("name"),
@@ -166,8 +303,8 @@ export default function Home() {
         return;
       }
 
-      setMembers(storedMembers ?? []);
-      setRounds(storedRounds ?? []);
+      setMembers((storedMembers ?? []) as Member[]);
+      setRounds((storedRounds ?? []) as Round[]);
       setSettings(
         (storedSettings ?? []).reduce((acc: Record<string, unknown>, row) => {
           if (row && typeof row === "object" && "key" in row && "value" in row) {
@@ -176,15 +313,86 @@ export default function Home() {
           return acc;
         }, {})
       );
+
+      const storedResults = (storedSettings ?? []).find((row) => row && typeof row === "object" && "key" in row && row.key === "championship_results");
+      if (storedResults && typeof storedResults.value === "string") {
+        try {
+          const parsed = JSON.parse(storedResults.value as string) as Record<string, ChampionshipResult>;
+          setChampionshipResults(parsed);
+        } catch {
+          setChampionshipResults({});
+        }
+      }
+
       setStatusMessage(null);
     }
 
     load();
   }, []);
 
+  const [championshipResults, setChampionshipResults] = useState<Record<string, ChampionshipResult>>({});
+
+  const stats = useMemo<MemberStats[]>(() => {
+    return members.map((member) => {
+      const memberRounds = rounds
+        .filter((round) => round.member_id === member.id)
+        .sort((a, b) => new Date(b.played_at).getTime() - new Date(a.played_at).getTime());
+
+      const scores = memberRounds.map((round) => round.score);
+      const roundsCount = memberRounds.length;
+      const averageScore =
+        scores.length > 0
+          ? Number((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1))
+          : null;
+      const bestScore = scores.length > 0 ? Math.min(...scores) : null;
+      const recentAverage = scores.length > 0 ? Number((scores.slice(0, 5).reduce((sum, score) => sum + score, 0) / Math.min(scores.slice(0, 5).length, 5)).toFixed(1)) : null;
+      const recentThreeMonthAverage = getRecentAverage(memberRounds, 90);
+      const recentOneYearAverage = getRecentAverage(memberRounds, 365);
+      const rating = calculateRating(memberRounds, championshipResults[member.id] ?? "none");
+      const tier = calculateTier(rating);
+
+      return {
+        member,
+        rounds: memberRounds,
+        roundsCount,
+        averageScore,
+        bestScore,
+        recentAverage,
+        recentThreeMonthAverage,
+        recentOneYearAverage,
+        rating,
+        tier,
+      };
+    });
+  }, [members, rounds, championshipResults]);
+
+  const roundGroups = useMemo(() => groupRoundsByDateAndCourse(rounds), [rounds]);
+
+  const tierGroups = useMemo(() => {
+    const groups = { S: [] as MemberStats[], A: [] as MemberStats[], B: [] as MemberStats[], C: [] as MemberStats[] };
+    stats.forEach((stat) => {
+      if (stat.tier === "S") groups.S.push(stat);
+      if (stat.tier === "A") groups.A.push(stat);
+      if (stat.tier === "B") groups.B.push(stat);
+      if (stat.tier === "C") groups.C.push(stat);
+    });
+    return groups;
+  }, [stats]);
+
+  const rankingByRate = useMemo(() => [...stats].sort((a, b) => b.rating - a.rating), [stats]);
+  const rankingByBest = useMemo(() => [...stats].sort((a, b) => (a.bestScore ?? Number.POSITIVE_INFINITY) - (b.bestScore ?? Number.POSITIVE_INFINITY)), [stats]);
+  const teamSplit = useMemo(() => {
+    const selectedStats = stats.filter((stat) => selectedMemberIds.includes(stat.member.id));
+    return generateBalancedTeams(selectedStats);
+  }, [stats, selectedMemberIds, teamVersion]);
+
   async function handleAddMember(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!newMemberName.trim()) return;
+    if (!supabase) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
+      return;
+    }
 
     setLoading(true);
     const { error } = await supabase.from("members").insert([{ name: newMemberName.trim() }]);
@@ -197,375 +405,481 @@ export default function Home() {
     }
 
     setNewMemberName("");
+    setIsMemberComposerOpen(false);
     setStatusMessage("メンバーを追加しました。");
     const { data: storedMembers } = await supabase.from("members").select("*").order("name");
-    setMembers(storedMembers ?? []);
+    setMembers((storedMembers ?? []) as Member[]);
   }
 
-  async function handleAddRound(event: FormEvent<HTMLFormElement>) {
+  async function handleSaveScores(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!newRound.memberId || !newRound.playedAt || !newRound.courseName.trim() || !newRound.score.trim()) {
+    if (!supabase) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
       return;
     }
 
-    const scoreValue = Number(newRound.score);
-    if (!Number.isFinite(scoreValue) || scoreValue <= 0) return;
+    const selectedMembers = members.filter((member) => selectedMemberIds.includes(member.id));
+    if (selectedMembers.length === 0 || !newRound.courseName.trim()) {
+      setStatusMessage("メンバーとゴルフ場を選択してください。");
+      return;
+    }
 
     setLoading(true);
-    const { error } = await supabase.from("rounds").insert([
-      {
-        member_id: newRound.memberId,
-        played_at: newRound.playedAt,
-        course_name: newRound.courseName.trim(),
-        score: scoreValue,
-      },
-    ]);
+
+    for (const member of selectedMembers) {
+      const scoreText = scoreDrafts[member.id] ?? "";
+      const scoreValue = Number(scoreText);
+      if (!scoreText.trim() || !Number.isFinite(scoreValue) || scoreValue <= 0) {
+        setLoading(false);
+        setStatusMessage("各メンバーのスコアを入力してください。");
+        return;
+      }
+
+      const { data: existingRounds, error: existingError } = await supabase
+        .from("rounds")
+        .select("*")
+        .eq("member_id", member.id)
+        .eq("played_at", newRound.playedAt)
+        .eq("course_name", newRound.courseName.trim());
+
+      if (existingError) {
+        setLoading(false);
+        setStatusMessage("スコア保存中にエラーが発生しました。再度お試しください。" );
+        console.error(existingError);
+        return;
+      }
+
+      if ((existingRounds ?? []).length > 0) {
+        const existingRound = existingRounds?.[0];
+        const { error: updateError } = await supabase.from("rounds").update({ score: scoreValue }).eq("id", existingRound.id);
+        if (updateError) {
+          setLoading(false);
+          setStatusMessage("スコア更新に失敗しました。");
+          console.error(updateError);
+          return;
+        }
+      } else {
+        const { error: insertError } = await supabase.from("rounds").insert([
+          {
+            member_id: member.id,
+            played_at: newRound.playedAt,
+            course_name: newRound.courseName.trim(),
+            score: scoreValue,
+          },
+        ]);
+        if (insertError) {
+          setLoading(false);
+          setStatusMessage("スコア登録に失敗しました。");
+          console.error(insertError);
+          return;
+        }
+      }
+    }
+
     setLoading(false);
+    setStatusMessage("スコアを保存しました。");
+    const { data: storedRounds } = await supabase.from("rounds").select("*").order("played_at", { ascending: false });
+    setRounds((storedRounds ?? []) as Round[]);
+    setScoreDrafts({});
+    setNewRound({ courseName: "", playedAt: defaultPlayedAt });
+  }
+
+  async function handleSaveChampionshipResult(memberId: string, result: ChampionshipResult) {
+    if (!supabase) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
+      return;
+    }
+
+    const nextResults = {
+      ...championshipResults,
+      [memberId]: result,
+    };
+
+    setChampionshipResults(nextResults);
+    const { error } = await supabase.from("settings").upsert([
+      { key: "championship_results", value: JSON.stringify(nextResults) },
+    ]);
 
     if (error) {
-      setStatusMessage("スコア登録に失敗しました。");
+      setStatusMessage("大会結果の保存に失敗しました。");
       console.error(error);
       return;
     }
 
-    setNewRound((current) => ({
-      ...current,
-      courseName: "",
-      score: "",
-    }));
-    setStatusMessage("スコアを登録しました。");
-
-    const { data: storedRounds } = await supabase.from("rounds").select("*").order("played_at", { ascending: false });
-    setRounds(storedRounds ?? []);
+    setStatusMessage("大会結果を保存しました。");
   }
 
-  const tierCounts = useMemo(() => {
-    return stats.reduce(
-      (acc, stat) => {
-        acc[stat.tier] = (acc[stat.tier] ?? 0) + 1;
-        return acc;
-      },
-      { S: 0, A: 0, B: 0, C: 0, D: 0 } as Record<string, number>
-    );
-  }, [stats]);
+  function toggleMemberSelection(memberId: string) {
+    setSelectedMemberIds((current) => (current.includes(memberId) ? current.filter((id) => id !== memberId) : [...current, memberId]));
+  }
 
-  const overallAverageScore = useMemo(() => {
-    const scores = stats
-      .map((stat) => stat.averageScore)
-      .filter((value): value is number => value !== null);
-    if (scores.length === 0) return null;
-    return Number((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1));
-  }, [stats]);
-
-  const teamGroups = useMemo(() => buildTeamGroups(stats), [stats]);
-  const topStats = [...stats].sort((a, b) => b.rating - a.rating).slice(0, 5);
+  const selectedMembers = useMemo(() => members.filter((member) => selectedMemberIds.includes(member.id)), [members, selectedMemberIds]);
+  const selectedMemberDetails = useMemo(() => stats.filter((stat) => selectedMemberIds.includes(stat.member.id)), [stats, selectedMemberIds]);
+  const activeRankingMember = stats.find((stat) => stat.member.id === selectedRankingMemberId) ?? null;
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-4 pb-24 pt-6 sm:px-6 lg:px-8">
-        <header className="mb-6">
-          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-500">ゴルフ Tier 表</p>
-          <h1 className="mt-3 text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
-            年末コンペ向け 10人ゴルフ管理
+    <div className="min-h-screen overflow-x-hidden bg-[#111111] text-[#111111]">
+      <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-3 pb-28 pt-0 sm:px-4">
+        <header className="sticky top-0 z-30 border-b border-[#2b2b2b] bg-[#111111] px-3 py-4 sm:px-4">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.35em] text-[#b91c1c]">Golf Tier</p>
+          <h1 className="mt-2 text-[28px] font-semibold text-[#f5e8e8] sm:text-[34px]" style={{ fontFamily: "Georgia, 'Times New Roman', serif" }}>
+            南高ゴルフ部Tier表
           </h1>
-          <p className="mt-3 max-w-2xl text-slate-600 sm:text-lg">
-            メンバー登録・ラウンド入力・自動Tier算出・2チーム分けをひとつの画面で管理します。
-          </p>
         </header>
 
-        <div className="space-y-6">
-          <section id="summary" className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-3">
-              <div className="overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-                <p className="text-sm text-slate-500">登録メンバー</p>
-                <p className="mt-4 text-3xl font-semibold text-slate-900">{members.length}</p>
-              </div>
-              <div className="overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-                <p className="text-sm text-slate-500">平均スコア</p>
-                <p className="mt-4 text-3xl font-semibold text-slate-900">{overallAverageScore ?? "-"}</p>
-              </div>
-              <div className="overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-                <p className="text-sm text-slate-500">設定数</p>
-                <p className="mt-4 text-3xl font-semibold text-slate-900">{Object.keys(settings).length}</p>
-              </div>
-              <div className="flex flex-col justify-between overflow-hidden rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-                <div>
-                  <p className="text-sm text-slate-500">チーム分け</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">{teamGroups.totals.teamA + teamGroups.totals.teamB > 0 ? teamGroups.totals.teamA + teamGroups.totals.teamB : "-"}</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setTeamsVisible((visible) => !visible)}
-                  className="mt-4 inline-flex w-full items-center justify-center rounded-3xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-700"
-                >
-                  {teamsVisible ? "チームを閉じる" : "チーム分けを表示"}
-                </button>
-              </div>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-5">
-              {(["S", "A", "B", "C", "D"] as const).map((tier) => (
-                <div key={tier} className="rounded-3xl bg-white p-4 text-center shadow-sm ring-1 ring-slate-200">
-                  <p className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Tier {tier}</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">{tierCounts[tier]}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-
+        <main className="flex-1 py-4">
           {statusMessage ? (
-            <div className="rounded-3xl border border-emerald-300/70 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+            <div className="mb-4 rounded-[20px] border border-[#d6d3d1] bg-[#fff7ed] px-4 py-3 text-sm text-[#7c2d12] shadow-sm">
               {statusMessage}
             </div>
           ) : null}
 
-          {teamsVisible ? (
-            <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <h2 className="text-xl font-semibold text-slate-900">チーム分け結果</h2>
-                  <p className="mt-1 text-sm text-slate-500">平均スコアに基づいて5人ずつに分けています。</p>
-                </div>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-2">
-                  <div className="rounded-3xl bg-slate-50 p-4 text-center">
-                    <p className="text-sm text-slate-500">Team A 合計</p>
-                    <p className="mt-2 text-2xl font-semibold text-slate-900">{teamGroups.totals.teamA}</p>
+          {activeTab === "score" ? (
+            <div className="space-y-4">
+              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-[18px] font-semibold text-[#111111]">スコア入力</h2>
+                    <p className="mt-1 text-sm text-[#6b7280]">ゴルフ場・日付・参加者・スコアをまとめて保存できます。</p>
                   </div>
-                  <div className="rounded-3xl bg-slate-50 p-4 text-center">
-                    <p className="text-sm text-slate-500">Team B 合計</p>
-                    <p className="mt-2 text-2xl font-semibold text-slate-900">{teamGroups.totals.teamB}</p>
-                  </div>
+                  <div className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">iPhone最適化</div>
                 </div>
-              </div>
-              <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                <div className="rounded-3xl bg-slate-50 p-4">
-                  <p className="text-sm font-semibold text-slate-900">Team A</p>
-                  <ul className="mt-4 space-y-2 text-slate-700">
-                    {teamGroups.teamA.map((player) => (
-                      <li key={player.member.id} className="flex items-center justify-between rounded-2xl bg-white px-3 py-2">
-                        <span>{player.member.name}</span>
-                        <span className="text-sm font-semibold text-slate-900">{player.averageScore ?? "-"}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                <div className="rounded-3xl bg-slate-50 p-4">
-                  <p className="text-sm font-semibold text-slate-900">Team B</p>
-                  <ul className="mt-4 space-y-2 text-slate-700">
-                    {teamGroups.teamB.map((player) => (
-                      <li key={player.member.id} className="flex items-center justify-between rounded-2xl bg-white px-3 py-2">
-                        <span>{player.member.name}</span>
-                        <span className="text-sm font-semibold text-slate-900">{player.averageScore ?? "-"}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            </section>
-          ) : null}
 
-          <section id="members" className="space-y-4">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold text-slate-900">メンバー一覧</h2>
-                <p className="mt-1 text-sm text-slate-500">メンバーごとのTierとレーティングを確認できます。</p>
-              </div>
-              <div className="rounded-2xl bg-slate-100 px-4 py-2 text-sm text-slate-600">
-                {loading ? "読み込み中..." : "最新データ"}
-              </div>
-            </div>
+                <form onSubmit={handleSaveScores} className="mt-5 space-y-4">
+                  <label className="block text-sm font-medium text-[#111111]">
+                    ゴルフ場
+                    <input
+                      value={newRound.courseName}
+                      onChange={(event) => setNewRound((current) => ({ ...current, courseName: event.target.value }))}
+                      placeholder="例: 霞ヶ関CC"
+                      className="mt-2 h-[46px] w-full rounded-[18px] border border-[#d1d5db] bg-[#f9fafb] px-4 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                    />
+                  </label>
 
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {stats.map((stat) => (
-                <article key={stat.member.id} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">{stat.tier} Tier</p>
-                      <h3 className="mt-3 text-lg font-semibold text-slate-900">{stat.member.name}</h3>
+                  <label className="block text-sm font-medium text-[#111111]">
+                    日付
+                    <input
+                      type="date"
+                      value={newRound.playedAt}
+                      onChange={(event) => setNewRound((current) => ({ ...current, playedAt: event.target.value }))}
+                      className="mt-2 h-[46px] w-full rounded-[18px] border border-[#d1d5db] bg-[#f9fafb] px-4 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                    />
+                  </label>
+
+                  <div className="rounded-[24px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-[#111111]">メンバー</p>
+                        <p className="text-xs text-[#6b7280]">複数選択してスコアを入力できます。</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setIsMemberComposerOpen((open) => !open)}
+                        className="flex h-[44px] min-w-[44px] items-center justify-center rounded-full bg-[#111111] px-3 text-lg font-semibold text-white"
+                      >
+                        +
+                      </button>
                     </div>
-                    <div className="rounded-2xl bg-slate-900 px-3 py-2 text-right text-sm font-semibold text-white">
-                      {stat.rating}
-                    </div>
-                  </div>
-                  <div className="mt-5 grid gap-3 text-sm text-slate-600 sm:grid-cols-2">
-                    <div className="rounded-3xl bg-slate-50 p-3">
-                      <p className="font-medium text-slate-900">ラウンド数</p>
-                      <p className="mt-2 text-xl">{stat.roundsCount}</p>
-                    </div>
-                    <div className="rounded-3xl bg-slate-50 p-3">
-                      <p className="font-medium text-slate-900">平均</p>
-                      <p className="mt-2 text-xl">{stat.averageScore ?? "-"}</p>
-                    </div>
-                    <div className="rounded-3xl bg-slate-50 p-3">
-                      <p className="font-medium text-slate-900">ベスト</p>
-                      <p className="mt-2 text-xl">{stat.bestScore ?? "-"}</p>
-                    </div>
-                    <div className="rounded-3xl bg-slate-50 p-3">
-                      <p className="font-medium text-slate-900">直近5回</p>
-                      <p className="mt-2 text-xl">{stat.recentAverage ?? "-"}</p>
+
+                    {isMemberComposerOpen ? (
+                      <form onSubmit={handleAddMember} className="mb-3 space-y-2 rounded-[18px] border border-[#e5e7eb] bg-white p-3">
+                        <input
+                          value={newMemberName}
+                          onChange={(event) => setNewMemberName(event.target.value)}
+                          placeholder="新しいメンバー名"
+                          className="h-[44px] w-full rounded-[14px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                        />
+                        <button type="submit" className="h-[44px] w-full rounded-[14px] bg-[#b91c1c] text-sm font-semibold text-white">
+                          登録する
+                        </button>
+                      </form>
+                    ) : null}
+
+                    <div className="flex flex-wrap gap-2">
+                      {members.map((member) => {
+                        const active = selectedMemberIds.includes(member.id);
+                        return (
+                          <button
+                            key={member.id}
+                            type="button"
+                            onClick={() => toggleMemberSelection(member.id)}
+                            className={`rounded-full border px-3 py-2 text-sm font-semibold ${active ? "border-[#b91c1c] bg-[#fef2f2] text-[#b91c1c]" : "border-[#d1d5db] bg-white text-[#111111]"}`}
+                          >
+                            {member.name}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
-                </article>
-              ))}
-            </div>
-          </section>
 
-          <section id="add-member" className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-            <article className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-              <h2 className="text-xl font-semibold text-slate-900">新しいメンバーを追加</h2>
-              <p className="mt-2 text-sm text-slate-500">友人の名前を登録して、ラウンド入力を始めましょう。</p>
-              <form onSubmit={handleAddMember} className="mt-6 space-y-4">
-                <label className="block text-sm font-medium text-slate-700">名前</label>
-                <input
-                  value={newMemberName}
-                  onChange={(event) => setNewMemberName(event.target.value)}
-                  placeholder="例: 田中 太郎"
-                  className="w-full rounded-3xl border border-slate-300 bg-slate-50 px-4 py-3 text-slate-900 outline-none transition focus:border-slate-500"
-                />
-                <button
-                  type="submit"
-                  className="inline-flex w-full items-center justify-center rounded-3xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-700"
-                >
-                  メンバーを追加
-                </button>
-              </form>
-            </article>
-
-            <article className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-              <h2 className="text-xl font-semibold text-slate-900">2チーム自動分け</h2>
-              <p className="mt-2 text-sm text-slate-500">レーティング合計を近くするように5人ずつ自動で振り分けます。</p>
-              <div className="mt-6 space-y-4">
-                <div className="rounded-3xl bg-slate-50 p-4">
-                  <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Team A</p>
-                  <p className="mt-2 text-2xl font-semibold text-slate-900">{teams.totals.teamA}</p>
-                </div>
-                <div className="rounded-3xl bg-slate-50 p-4">
-                  <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Team B</p>
-                  <p className="mt-2 text-2xl font-semibold text-slate-900">{teams.totals.teamB}</p>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-                    <p className="text-sm font-semibold text-slate-900">Team A</p>
-                    <ul className="mt-3 space-y-2 text-slate-600">
-                      {teams.teamA.map((player) => (
-                        <li key={player.member.id} className="flex items-center justify-between rounded-2xl bg-slate-50 px-3 py-2">
-                          <span>{player.member.name}</span>
-                          <span className="text-sm font-semibold text-slate-900">{player.rating}</span>
-                        </li>
+                  {selectedMembers.length > 0 ? (
+                    <div className="space-y-3">
+                      {selectedMembers.map((member) => (
+                        <label key={member.id} className="block rounded-[20px] border border-[#e5e7eb] bg-[#f9fafb] p-3">
+                          <div className="mb-2 text-sm font-semibold text-[#111111]">{member.name}</div>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            value={scoreDrafts[member.id] ?? ""}
+                            onChange={(event) => setScoreDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
+                            placeholder="スコア"
+                            className="h-[46px] w-full rounded-[14px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                          />
+                        </label>
                       ))}
-                    </ul>
+                    </div>
+                  ) : (
+                    <div className="rounded-[20px] border border-dashed border-[#d1d5db] p-4 text-sm text-[#6b7280]">
+                      まずはメンバーを選択してください。
+                    </div>
+                  )}
+
+                  <button type="submit" className="h-[48px] w-full rounded-[18px] bg-[#111111] text-sm font-semibold text-white">
+                    保存する
+                  </button>
+                </form>
+              </section>
+
+              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-[18px] font-semibold text-[#111111]">ラウンド履歴</h2>
+                    <p className="mt-1 text-sm text-[#6b7280]">日付とゴルフ場単位でまとめて表示します。</p>
                   </div>
-                  <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-                    <p className="text-sm font-semibold text-slate-900">Team B</p>
-                    <ul className="mt-3 space-y-2 text-slate-600">
-                      {teams.teamB.map((player) => (
-                        <li key={player.member.id} className="flex items-center justify-between rounded-2xl bg-slate-50 px-3 py-2">
-                          <span>{player.member.name}</span>
-                          <span className="text-sm font-semibold text-slate-900">{player.rating}</span>
-                        </li>
-                      ))}
-                    </ul>
+                  <span className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">{roundGroups.length}</span>
+                </div>
+
+                {roundGroups.length === 0 ? (
+                  <div className="rounded-[20px] border border-dashed border-[#d1d5db] p-5 text-sm text-[#6b7280]">
+                    まだデータがありません。
                   </div>
-                </div>
-              </div>
-            </article>
-          </section>
+                ) : (
+                  <div className="space-y-3">
+                    {roundGroups.map((group) => {
+                      const isOpen = expandedHistoryId === `${group.date}-${group.course}`;
+                      return (
+                        <div key={`${group.date}-${group.course}`} className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                          <button type="button" onClick={() => setExpandedHistoryId(isOpen ? null : `${group.date}-${group.course}`)} className="flex w-full items-center justify-between gap-3 text-left">
+                            <div>
+                              <p className="text-sm font-semibold text-[#111111]">{formatDate(group.date)}</p>
+                              <p className="mt-1 text-sm text-[#6b7280]">{group.course}</p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-sm font-semibold text-[#b91c1c]">最少 {group.minScore}</p>
+                              <p className="mt-1 text-xs text-[#6b7280]">{group.entries[0]?.memberName || "-"}</p>
+                            </div>
+                          </button>
 
-          <section id="add-score" className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-            <h2 className="text-xl font-semibold text-slate-900">スコアを入力</h2>
-            <p className="mt-2 text-sm text-slate-500">各メンバーの最新ラウンド結果を記録してください。</p>
-            <form onSubmit={handleAddRound} className="mt-6 space-y-4">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="block">
-                  <span className="text-sm font-medium text-slate-700">メンバー</span>
-                  <select
-                    value={newRound.memberId}
-                    onChange={(event) => setNewRound((current) => ({ ...current, memberId: event.target.value }))}
-                    className="mt-2 w-full rounded-3xl border border-slate-300 bg-slate-50 px-4 py-3 text-slate-900 outline-none focus:border-slate-500"
-                  >
-                    <option value="">選択してください</option>
-                    {members.map((member) => (
-                      <option key={member.id} value={member.id}>
-                        {member.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block">
-                  <span className="text-sm font-medium text-slate-700">日付</span>
-                  <input
-                    type="date"
-                    value={newRound.playedAt}
-                    onChange={(event) => setNewRound((current) => ({ ...current, playedAt: event.target.value }))}
-                    className="mt-2 w-full rounded-3xl border border-slate-300 bg-slate-50 px-4 py-3 text-slate-900 outline-none focus:border-slate-500"
-                  />
-                </label>
-              </div>
-
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="block">
-                  <span className="text-sm font-medium text-slate-700">ゴルフ場</span>
-                  <input
-                    value={newRound.courseName}
-                    onChange={(event) => setNewRound((current) => ({ ...current, courseName: event.target.value }))}
-                    placeholder="ゴルフ場名"
-                    className="mt-2 w-full rounded-3xl border border-slate-300 bg-slate-50 px-4 py-3 text-slate-900 outline-none focus:border-slate-500"
-                  />
-                </label>
-                <label className="block">
-                  <span className="text-sm font-medium text-slate-700">スコア</span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    value={newRound.score}
-                    onChange={(event) => setNewRound((current) => ({ ...current, score: event.target.value }))}
-                    placeholder="例: 82"
-                    className="mt-2 w-full rounded-3xl border border-slate-300 bg-slate-50 px-4 py-3 text-slate-900 outline-none focus:border-slate-500"
-                  />
-                </label>
-              </div>
-
-              <button
-                type="submit"
-                className="inline-flex w-full items-center justify-center rounded-3xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-700"
-              >
-                スコアを保存
-              </button>
-            </form>
-          </section>
-
-          <section id="top-performers" className="space-y-4">
-            <h2 className="text-xl font-semibold text-slate-900">注目ポイント</h2>
-            <div className="grid gap-4 sm:grid-cols-3">
-              {topStats.map((stat) => (
-                <div key={stat.member.id} className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-                  <p className="text-sm text-slate-500">{stat.member.name}</p>
-                  <p className="mt-3 text-2xl font-semibold text-slate-900">{stat.rating}</p>
-                  <p className="mt-1 text-sm text-slate-600">Tier {stat.tier}</p>
-                </div>
-              ))}
+                          {isOpen ? (
+                            <div className="mt-3 space-y-2">
+                              {group.entries
+                                .slice()
+                                .sort((a, b) => a.score - b.score)
+                                .map((entry) => (
+                                  <div key={`${group.date}-${group.course}-${entry.memberId}`} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2">
+                                    <span className="text-sm text-[#111111]">{entry.memberName || entry.memberId}</span>
+                                    <span className="text-sm font-semibold text-[#111111]">{entry.score}</span>
+                                  </div>
+                                ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
             </div>
-          </section>
-        </div>
+          ) : (
+            <div className="space-y-4">
+              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-[18px] font-semibold text-[#111111]">Tier表</h2>
+                    <p className="mt-1 text-sm text-[#6b7280]">レート点数に応じてS〜Cで分類します。</p>
+                  </div>
+                  <button type="button" onClick={() => setExpandedDetail((current) => (current === "tier" ? null : "tier"))} className="rounded-full bg-[#111111] px-3 py-2 text-sm font-semibold text-white">
+                    {expandedDetail === "tier" ? "閉じる" : "開く"}
+                  </button>
+                </div>
+                {expandedDetail === "tier" ? (
+                  <div className="mt-4 space-y-3">
+                    {(["S", "A", "B", "C"] as const).map((tier) => (
+                      <div key={tier} className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                        <div className="mb-2 flex items-center justify-between">
+                          <p className="text-sm font-semibold text-[#111111]">Tier {tier}</p>
+                          <span className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">{tierGroups[tier].length}</span>
+                        </div>
+                        <div className="space-y-2">
+                          {tierGroups[tier].length === 0 ? (
+                            <p className="text-sm text-[#6b7280]">まだデータがありません。</p>
+                          ) : (
+                            tierGroups[tier].map((stat) => (
+                              <div key={stat.member.id} className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-sm font-semibold text-[#111111]">{stat.member.name}</p>
+                                  <p className="text-sm font-semibold text-[#111111]">{stat.rating}pt</p>
+                                </div>
+                                <p className="mt-1 text-xs text-[#6b7280]">平均 {stat.averageScore ?? "-"} / ベスト {stat.bestScore ?? "-"}</p>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-[18px] font-semibold text-[#111111]">個人ランキング</h2>
+                    <p className="mt-1 text-sm text-[#6b7280]">レート点数とベストスコアをランキング化します。</p>
+                  </div>
+                  <button type="button" onClick={() => setExpandedDetail((current) => (current === "ranking" ? null : "ranking"))} className="rounded-full bg-[#111111] px-3 py-2 text-sm font-semibold text-white">
+                    {expandedDetail === "ranking" ? "閉じる" : "開く"}
+                  </button>
+                </div>
+
+                {expandedDetail === "ranking" ? (
+                  <div className="mt-4 space-y-4">
+                    <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                      <p className="text-sm font-semibold text-[#111111]">レート点数ランキング</p>
+                      <div className="mt-3 space-y-2">
+                        {rankingByRate.map((stat, index) => (
+                          <button key={stat.member.id} type="button" onClick={() => setSelectedRankingMemberId(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
+                            <span className="text-sm font-semibold text-[#111111]">{index + 1}. {stat.member.name}</span>
+                            <span className="text-sm font-semibold text-[#b91c1c]">{stat.rating}pt</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                      <p className="text-sm font-semibold text-[#111111]">ベストスコアランキング</p>
+                      <div className="mt-3 space-y-2">
+                        {rankingByBest.map((stat, index) => (
+                          <button key={stat.member.id} type="button" onClick={() => setSelectedRankingMemberId(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
+                            <span className="text-sm font-semibold text-[#111111]">{index + 1}. {stat.member.name}</span>
+                            <span className="text-sm font-semibold text-[#111111]">{stat.bestScore ?? "-"}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {activeRankingMember ? (
+                      <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                        <p className="text-sm font-semibold text-[#111111]">{activeRankingMember.member.name}の詳細</p>
+                        <div className="mt-3 grid gap-2 text-sm text-[#111111]">
+                          <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">ベストスコア: {activeRankingMember.bestScore ?? "-"}</div>
+                          <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">平均スコア: {activeRankingMember.averageScore ?? "-"}</div>
+                          <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">直近3か月平均: {activeRankingMember.recentThreeMonthAverage ?? "-"}</div>
+                          <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">レート点数: {activeRankingMember.rating}pt</div>
+                          <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">Tier: {activeRankingMember.tier}</div>
+                        </div>
+                        <div className="mt-3 space-y-2">
+                          <p className="text-sm font-semibold text-[#111111]">スコア履歴</p>
+                          {activeRankingMember.rounds.slice().sort((a, b) => b.played_at.localeCompare(a.played_at)).map((round) => (
+                            <div key={round.id} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm">
+                              <span>{formatDate(round.played_at)} · {round.course_name}</span>
+                              <span className="font-semibold">{round.score}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-[18px] font-semibold text-[#111111]">自動チーム分け</h2>
+                    <p className="mt-1 text-sm text-[#6b7280]">対象メンバーを選んで2チームへ自動分けします。</p>
+                  </div>
+                  <button type="button" onClick={() => setExpandedDetail((current) => (current === "teams" ? null : "teams"))} className="rounded-full bg-[#111111] px-3 py-2 text-sm font-semibold text-white">
+                    {expandedDetail === "teams" ? "閉じる" : "開く"}
+                  </button>
+                </div>
+                {expandedDetail === "teams" ? (
+                  <div className="mt-4 space-y-4">
+                    <div className="flex flex-wrap gap-2">
+                      {members.map((member) => {
+                        const active = selectedMemberIds.includes(member.id);
+                        return (
+                          <button key={member.id} type="button" onClick={() => toggleMemberSelection(member.id)} className={`rounded-full border px-3 py-2 text-sm font-semibold ${active ? "border-[#b91c1c] bg-[#fef2f2] text-[#b91c1c]" : "border-[#d1d5db] bg-white text-[#111111]"}`}>
+                            {member.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                          <p className="text-sm font-semibold text-[#111111]">Team A</p>
+                          {teamSplit.teamA.length === 0 ? <p className="mt-2 text-sm text-[#6b7280]">未選択</p> : teamSplit.teamA.map((stat) => <p key={stat.member.id} className="mt-2 text-sm text-[#111111]">{stat.member.name}</p>)}
+                        </div>
+                        <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                          <p className="text-sm font-semibold text-[#111111]">Team B</p>
+                          {teamSplit.teamB.length === 0 ? <p className="mt-2 text-sm text-[#6b7280]">未選択</p> : teamSplit.teamB.map((stat) => <p key={stat.member.id} className="mt-2 text-sm text-[#111111]">{stat.member.name}</p>)}
+                        </div>
+                      </div>
+                      <div className="mt-3 rounded-[16px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#111111]">
+                        <p>Team A合計: {teamSplit.totals.teamA}</p>
+                        <p className="mt-1">Team B合計: {teamSplit.totals.teamB}</p>
+                        <p className="mt-1">レート差: {teamSplit.difference}</p>
+                      </div>
+                    </div>
+
+                    <button type="button" onClick={() => setTeamVersion((current) => current + 1)} className="h-[44px] w-full rounded-[16px] bg-[#b91c1c] text-sm font-semibold text-white">
+                      再計算する
+                    </button>
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-[18px] font-semibold text-[#111111]">大会結果</h2>
+                    <p className="mt-1 text-sm text-[#6b7280]">昨年の年末コンペ結果を入力できます。</p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {members.map((member) => (
+                    <label key={member.id} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] px-3 py-3 text-sm">
+                      <span className="font-semibold text-[#111111]">{member.name}</span>
+                      <select
+                        value={championshipResults[member.id] ?? "none"}
+                        onChange={(event) => handleSaveChampionshipResult(member.id, event.target.value as ChampionshipResult)}
+                        className="rounded-[12px] border border-[#d1d5db] bg-white px-2 py-2 text-sm text-[#111111]"
+                      >
+                        <option value="none">なし</option>
+                        <option value="third">3位</option>
+                        <option value="runner-up">準優勝</option>
+                        <option value="win">優勝</option>
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              </section>
+            </div>
+          )}
+        </main>
       </div>
 
-      <nav className="fixed bottom-0 left-0 right-0 z-20 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur sm:px-6">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-2">
-          {[
-            { href: "#summary", label: "概要" },
-            { href: "#members", label: "メンバー" },
-            { href: "#add-score", label: "スコア入力" },
-            { href: "#add-member", label: "追加" },
-          ].map((item) => (
-            <a
-              key={item.href}
-              href={item.href}
-              className="flex-1 rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-center text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
-            >
-              {item.label}
-            </a>
-          ))}
+      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-[#2b2b2b] bg-[#111111] px-3 py-3 pb-[calc(env(safe-area-inset-bottom)+12px)]">
+        <div className="mx-auto flex max-w-3xl gap-2">
+          <button type="button" onClick={() => setActiveTab("score")} className={`flex-1 rounded-[16px] px-3 py-3 text-sm font-semibold ${activeTab === "score" ? "bg-[#fef2f2] text-[#b91c1c]" : "bg-[#1f1f1f] text-[#f5e8e8]"}`}>
+            スコア入力
+          </button>
+          <button type="button" onClick={() => setActiveTab("tier")} className={`flex-1 rounded-[16px] px-3 py-3 text-sm font-semibold ${activeTab === "tier" ? "bg-[#fef2f2] text-[#b91c1c]" : "bg-[#1f1f1f] text-[#f5e8e8]"}`}>
+            Tier表
+          </button>
         </div>
       </nav>
     </div>
