@@ -386,29 +386,40 @@ export default function Home() {
     return generateBalancedTeams(selectedStats);
   }, [stats, selectedMemberIds, teamVersion]);
 
-  async function handleAddMember(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!newMemberName.trim()) return;
+  async function handleAddMember(event?: FormEvent<HTMLFormElement>) {
+    if (event) event.preventDefault();
+    const trimmedName = newMemberName.trim();
+    if (!trimmedName) {
+      setStatusMessage("メンバー名を入力してください。");
+      return;
+    }
     if (!supabase) {
       setStatusMessage("Supabaseの接続設定がないため、保存できません。");
       return;
     }
 
     setLoading(true);
-    const { error } = await supabase.from("members").insert([{ name: newMemberName.trim() }]);
+    const { data, error } = await supabase
+      .from("members")
+      .insert([{ name: trimmedName }])
+      .select()
+      .single();
     setLoading(false);
 
     if (error) {
-      setStatusMessage("メンバー追加に失敗しました。");
-      console.error(error);
+      console.error("member insert error", error);
+      setStatusMessage("メンバー登録に失敗しました。" );
       return;
     }
 
+    const { data: storedMembers } = await supabase.from("members").select("*").order("name");
+    setMembers((storedMembers ?? []) as Member[]);
+    if (data) {
+      setSelectedMemberIds((prev) => (prev.includes(data.id) ? prev : [...prev, data.id]));
+    }
     setNewMemberName("");
     setIsMemberComposerOpen(false);
     setStatusMessage("メンバーを追加しました。");
-    const { data: storedMembers } = await supabase.from("members").select("*").order("name");
-    setMembers((storedMembers ?? []) as Member[]);
   }
 
   async function handleSaveScores(event: FormEvent<HTMLFormElement>) {
@@ -542,10 +553,10 @@ export default function Home() {
                     <h2 className="text-[18px] font-semibold text-[#111111]">スコア入力</h2>
                     <p className="mt-1 text-sm text-[#6b7280]">ゴルフ場・日付・参加者・スコアをまとめて保存できます。</p>
                   </div>
-                  <div className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">iPhone最適化</div>
                 </div>
 
-                <form onSubmit={handleSaveScores} className="mt-5 space-y-4">
+                <div className="mt-5 space-y-4">
+                  <form onSubmit={handleSaveScores} className="space-y-4">
                   <label className="block text-sm font-medium text-[#111111]">
                     ゴルフ場
                     <input
@@ -582,17 +593,17 @@ export default function Home() {
                     </div>
 
                     {isMemberComposerOpen ? (
-                      <form onSubmit={handleAddMember} className="mb-3 space-y-2 rounded-[18px] border border-[#e5e7eb] bg-white p-3">
+                      <div className="mb-3 space-y-2 rounded-[18px] border border-[#e5e7eb] bg-white p-3">
                         <input
                           value={newMemberName}
                           onChange={(event) => setNewMemberName(event.target.value)}
                           placeholder="新しいメンバー名"
                           className="h-[44px] w-full rounded-[14px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
                         />
-                        <button type="submit" className="h-[44px] w-full rounded-[14px] bg-[#b91c1c] text-sm font-semibold text-white">
+                        <button type="button" onClick={() => handleAddMember()} className="h-[44px] w-full rounded-[14px] bg-[#b91c1c] text-sm font-semibold text-white">
                           登録する
                         </button>
-                      </form>
+                      </div>
                     ) : null}
 
                     <div className="flex flex-wrap gap-2">
@@ -639,6 +650,7 @@ export default function Home() {
                     保存する
                   </button>
                 </form>
+                </div>
               </section>
 
               <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
