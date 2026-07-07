@@ -408,7 +408,13 @@ export default function Home() {
 
     if (error) {
       console.error("member insert error", error);
-      setStatusMessage("メンバー登録に失敗しました。" );
+      const errMsg = error?.message ? String(error.message) : JSON.stringify(error);
+      let display = `メンバー登録に失敗しました: ${errMsg}`;
+      const lower = errMsg.toLowerCase();
+      if (lower.includes("policy") || lower.includes("rls") || lower.includes("permission") || lower.includes("forbidden") || lower.includes("not authenticated")) {
+        display += " — SupabaseのRLSまたはPolicy設定が原因で登録できない可能性があります。設定を確認してください。";
+      }
+      setStatusMessage(display);
       return;
     }
 
@@ -711,7 +717,11 @@ export default function Home() {
                     <h2 className="text-[18px] font-semibold text-[#111111]">Tier表</h2>
                     <p className="mt-1 text-sm text-[#6b7280]">レート点数に応じてS〜Cで分類します。</p>
                   </div>
-                  <button type="button" onClick={() => setExpandedDetail((current) => (current === "tier" ? null : "tier"))} className="rounded-full bg-[#111111] px-3 py-2 text-sm font-semibold text-white">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedDetail((current) => (current === "tier" ? null : "tier"))}
+                    className="rounded-full bg-[#111111] whitespace-nowrap min-w-[56px] h-11 px-4 text-sm flex items-center justify-center flex-shrink-0 font-semibold text-white"
+                  >
                     {expandedDetail === "tier" ? "閉じる" : "開く"}
                   </button>
                 </div>
@@ -750,7 +760,11 @@ export default function Home() {
                     <h2 className="text-[18px] font-semibold text-[#111111]">個人ランキング</h2>
                     <p className="mt-1 text-sm text-[#6b7280]">レート点数とベストスコアをランキング化します。</p>
                   </div>
-                  <button type="button" onClick={() => setExpandedDetail((current) => (current === "ranking" ? null : "ranking"))} className="rounded-full bg-[#111111] px-3 py-2 text-sm font-semibold text-white">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedDetail((current) => (current === "ranking" ? null : "ranking"))}
+                    className="rounded-full bg-[#111111] whitespace-nowrap min-w-[56px] h-11 px-4 text-sm flex items-center justify-center flex-shrink-0 font-semibold text-white"
+                  >
                     {expandedDetail === "ranking" ? "閉じる" : "開く"}
                   </button>
                 </div>
@@ -812,7 +826,11 @@ export default function Home() {
                     <h2 className="text-[18px] font-semibold text-[#111111]">自動チーム分け</h2>
                     <p className="mt-1 text-sm text-[#6b7280]">対象メンバーを選んで2チームへ自動分けします。</p>
                   </div>
-                  <button type="button" onClick={() => setExpandedDetail((current) => (current === "teams" ? null : "teams"))} className="rounded-full bg-[#111111] px-3 py-2 text-sm font-semibold text-white">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedDetail((current) => (current === "teams" ? null : "teams"))}
+                    className="rounded-full bg-[#111111] whitespace-nowrap min-w-[56px] h-11 px-4 text-sm flex items-center justify-center flex-shrink-0 font-semibold text-white"
+                  >
                     {expandedDetail === "teams" ? "閉じる" : "開く"}
                   </button>
                 </div>
