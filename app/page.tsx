@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
+import { getSupabaseClient } from "@/lib/supabase";
 
 type Member = {
   id: string;
@@ -43,9 +43,35 @@ type RoundGroup = {
   minMemberName: string;
 };
 
-type TabKey = "score" | "tier";
+type TabKey = "score" | "tier" | "results";
 
 type ChampionshipResult = "win" | "runner-up" | "third" | "none";
+
+type CompetitionEntry = {
+  memberId: string;
+  memberName: string;
+  score: number;
+  rating: number;
+};
+
+type CompetitionRecord = {
+  id: string;
+  date: string;
+  courseName: string;
+  teams: {
+    A: CompetitionEntry[];
+    B: CompetitionEntry[];
+  };
+  teamTotals: {
+    A: number;
+    B: number;
+  };
+  scoreTotals: {
+    A: number;
+    B: number;
+  };
+  winner: "A" | "B" | "draw";
+};
 
 type TeamSplit = {
   teamA: MemberStats[];
@@ -55,6 +81,11 @@ type TeamSplit = {
 };
 
 const defaultPlayedAt = new Date().toISOString().slice(0, 10);
+
+function parseCompetitions(value: unknown): CompetitionRecord[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is CompetitionRecord => Boolean(item && typeof item === "object"));
+}
 
 function formatDate(value: string | null | undefined) {
   if (!value) return "-";
@@ -151,7 +182,8 @@ function calculateRating(rounds: Round[], championshipResult: ChampionshipResult
   return points + resultBonus;
 }
 
-function groupRoundsByDateAndCourse(rounds: Round[]) {
+function groupRoundsByDateAndCourse(rounds: Round[], members: Member[]) {
+  const memberNameById = Object.fromEntries(members.map((member) => [member.id, member.name]));
   const grouped = new Map<string, RoundGroup>();
 
   rounds.forEach((round) => {
@@ -167,9 +199,10 @@ function groupRoundsByDateAndCourse(rounds: Round[]) {
     }
 
     const group = grouped.get(key)!;
+    const memberName = memberNameById[round.member_id] ?? "未登録";
     group.entries.push({
       memberId: round.member_id,
-      memberName: "",
+      memberName,
       score: round.score,
     });
 
@@ -180,10 +213,15 @@ function groupRoundsByDateAndCourse(rounds: Round[]) {
 
   return Array.from(grouped.values())
     .sort((a, b) => b.date.localeCompare(a.date))
-    .map((group) => ({
-      ...group,
-      entries: group.entries.sort((a, b) => a.score - b.score),
-    }));
+    .map((group) => {
+      const sortedEntries = group.entries.sort((a, b) => a.score - b.score);
+      const bestEntry = sortedEntries[0];
+      return {
+        ...group,
+        entries: sortedEntries,
+        minMemberName: bestEntry?.memberName ?? "-",
+      };
+    });
 }
 
 function generateBalancedTeams(stats: MemberStats[]) {
@@ -263,6 +301,13 @@ export default function Home() {
   const [expandedDetail, setExpandedDetail] = useState<"tier" | "ranking" | "teams" | null>("tier");
   const [selectedRankingMemberId, setSelectedRankingMemberId] = useState<string | null>(null);
   const [teamVersion, setTeamVersion] = useState(0);
+  const [isEditMembersMode, setIsEditMembersMode] = useState(false);
+  const [editMemberId, setEditMemberId] = useState<string | null>(null);
+  const [editMemberName, setEditMemberName] = useState("");
+  const [isCompetitionMode, setIsCompetitionMode] = useState(false);
+  const [competitionRecords, setCompetitionRecords] = useState<CompetitionRecord[]>([]);
+  const [isCompetitionEditing, setIsCompetitionEditing] = useState(false);
+  const [competitionDraftTeams, setCompetitionDraftTeams] = useState<{ A: Member[]; B: Member[] }>({ A: [], B: [] });
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -282,45 +327,83 @@ export default function Home() {
   useEffect(() => {
     async function load() {
       setLoading(true);
-      if (!supabase) {
+      const client: any = getSupabaseClient();
+      if (!client) {
         setLoading(false);
-        setStatusMessage("Supabaseの接続設定が未設定のため、データ読み込みできません。");
+        setStatusMessage("Supabaseの接続設定が未設定のため、データ読み込みできません。" );
         return;
       }
 
       const [{ data: storedMembers, error: memberError }, { data: storedRounds, error: roundError }, { data: storedSettings, error: settingsError }] =
         await Promise.all([
-          supabase.from("members").select("*").order("name"),
-          supabase.from("rounds").select("*").order("played_at", { ascending: false }),
-          supabase.from("settings").select("*").order("key"),
+          client.from("members").select("*").order("created_at", { ascending: true }),
+          client.from("rounds").select("*").order("played_at", { ascending: false }),
+          client.from("settings").select("*").order("key"),
         ]);
 
       setLoading(false);
 
       if (memberError || roundError || settingsError) {
-        setStatusMessage("データの取得中に問題が発生しました。もう一度お試しください。");
-        console.error(memberError ?? roundError ?? settingsError);
+        const err = memberError ?? roundError ?? settingsError;
+        console.error("Supabase load error:", {
+          message: err?.message,
+          code: err?.code,
+          details: err?.details,
+          hint: err?.hint,
+        });
+        let displayMsg = "データの取得中に問題が発生しました。";
+        if (memberError) displayMsg = `メンバー取得エラー: ${memberError.message}`;
+        else if (roundError) displayMsg = `ラウンド取得エラー: ${roundError.message}`;
+        else if (settingsError) displayMsg = `設定取得エラー: ${settingsError.message}`;
+        if (err?.message?.toLowerCase().includes("policy") || err?.message?.toLowerCase().includes("rls") || err?.message?.toLowerCase().includes("permission")) {
+          displayMsg += " — SupabaseのRLSまたはPolicy設定が原因で取得できない可能性があります。";
+        }
+        setStatusMessage(displayMsg);
         return;
       }
 
+      const storedSettingsRows = (storedSettings ?? []) as Array<Record<string, unknown>>;
       setMembers((storedMembers ?? []) as Member[]);
       setRounds((storedRounds ?? []) as Round[]);
       setSettings(
-        (storedSettings ?? []).reduce((acc: Record<string, unknown>, row) => {
-          if (row && typeof row === "object" && "key" in row && "value" in row) {
-            acc[row.key as string] = row.value;
+        storedSettingsRows.reduce((acc: Record<string, unknown>, row) => {
+          const setting = row as { key?: unknown; value?: unknown };
+          if (typeof setting.key === "string") {
+            acc[setting.key] = setting.value;
           }
           return acc;
         }, {})
       );
 
-      const storedResults = (storedSettings ?? []).find((row) => row && typeof row === "object" && "key" in row && row.key === "championship_results");
-      if (storedResults && typeof storedResults.value === "string") {
-        try {
-          const parsed = JSON.parse(storedResults.value as string) as Record<string, ChampionshipResult>;
-          setChampionshipResults(parsed);
-        } catch {
-          setChampionshipResults({});
+      const storedResults = storedSettingsRows.find((row) => {
+        const setting = row as { key?: unknown };
+        return typeof setting.key === "string" && setting.key === "championship_results";
+      });
+      if (storedResults) {
+        const setting = storedResults as { value?: unknown };
+        if (typeof setting.value === "string") {
+          try {
+            const parsed = JSON.parse(setting.value) as Record<string, ChampionshipResult>;
+            setChampionshipResults(parsed);
+          } catch {
+            setChampionshipResults({});
+          }
+        }
+      }
+
+      const storedCompetitions = storedSettingsRows.find((row) => {
+        const setting = row as { key?: unknown };
+        return typeof setting.key === "string" && setting.key === "competitions";
+      });
+      if (storedCompetitions) {
+        const setting = storedCompetitions as { value?: unknown };
+        if (typeof setting.value === "string") {
+          try {
+            const parsed = JSON.parse(setting.value) as CompetitionRecord[];
+            setCompetitionRecords(parsed);
+          } catch {
+            setCompetitionRecords([]);
+          }
         }
       }
 
@@ -366,7 +449,7 @@ export default function Home() {
     });
   }, [members, rounds, championshipResults]);
 
-  const roundGroups = useMemo(() => groupRoundsByDateAndCourse(rounds), [rounds]);
+  const roundGroups = useMemo(() => groupRoundsByDateAndCourse(rounds, members), [rounds, members]);
 
   const tierGroups = useMemo(() => {
     const groups = { S: [] as MemberStats[], A: [] as MemberStats[], B: [] as MemberStats[], C: [] as MemberStats[] };
@@ -389,48 +472,150 @@ export default function Home() {
   async function handleAddMember(event?: FormEvent<HTMLFormElement>) {
     if (event) event.preventDefault();
     const trimmedName = newMemberName.trim();
+    console.info("[members] add-member start", { trimmedName });
+
     if (!trimmedName) {
       setStatusMessage("メンバー名を入力してください。");
       return;
     }
-    if (!supabase) {
-      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
+
+    const client: any = getSupabaseClient();
+    console.info("[members] client ready", { hasClient: Boolean(client) });
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。" );
       return;
     }
 
     setLoading(true);
-    const { data, error } = await supabase
-      .from("members")
-      .insert([{ name: trimmedName }])
-      .select()
-      .single();
-    setLoading(false);
+    try {
+      console.info("[members] insert request", { table: "members", name: trimmedName });
+      const { data, error } = await client
+        .from("members")
+        .insert([{ name: trimmedName }])
+        .select("*")
+        .single();
 
-    if (error) {
-      console.error("member insert error", error);
-      const errMsg = error?.message ? String(error.message) : JSON.stringify(error);
-      let display = `メンバー登録に失敗しました: ${errMsg}`;
-      const lower = errMsg.toLowerCase();
-      if (lower.includes("policy") || lower.includes("rls") || lower.includes("permission") || lower.includes("forbidden") || lower.includes("not authenticated")) {
-        display += " — SupabaseのRLSまたはPolicy設定が原因で登録できない可能性があります。設定を確認してください。";
+      const insertedMember = (data as Member | null) ?? null;
+      console.info("[members] insert response", { data: insertedMember, error });
+
+      if (error) {
+        console.error("member insert error:", {
+          message: error.message,
+          code: error.code,
+          details: error.details,
+          hint: error.hint,
+        });
+        let display = `メンバー登録エラー: ${error.message}`;
+        const lower = (error.message ?? "").toLowerCase();
+        if (lower.includes("policy") || lower.includes("rls") || lower.includes("permission") || lower.includes("forbidden") || lower.includes("not authenticated")) {
+          display += " — SupabaseのRLSまたはPolicy設定が原因で登録できない可能性があります。設定を確認してください。";
+        }
+        setStatusMessage(display);
+        return;
       }
-      setStatusMessage(display);
+
+      const { data: storedMembers, error: refetchError } = await client.from("members").select("*").order("created_at", { ascending: true });
+      console.info("[members] refetch response", { storedMembers, refetchError });
+      if (refetchError) {
+        console.error("member refetch error:", {
+          message: refetchError.message,
+          code: refetchError.code,
+          details: refetchError.details,
+          hint: refetchError.hint,
+        });
+        setStatusMessage(`メンバー一覧更新エラー: ${refetchError.message}`);
+        return;
+      }
+
+      setMembers((storedMembers ?? []) as Member[]);
+      if (insertedMember?.id) {
+        setSelectedMemberIds((prev) => (prev.includes(insertedMember.id) ? prev : [...prev, insertedMember.id]));
+      }
+      setNewMemberName("");
+      setIsMemberComposerOpen(false);
+      setStatusMessage("メンバーを追加しました。");
+    } catch (caughtError) {
+      console.error("member insert thrown error:", caughtError);
+      const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
+      setStatusMessage(`メンバー登録エラー: ${message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function refreshMembers() {
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
       return;
     }
-
-    const { data: storedMembers } = await supabase.from("members").select("*").order("name");
-    setMembers((storedMembers ?? []) as Member[]);
-    if (data) {
-      setSelectedMemberIds((prev) => (prev.includes(data.id) ? prev : [...prev, data.id]));
+    const { data, error } = await client.from("members").select("*").order("created_at", { ascending: true });
+    if (error) {
+      console.error("fetch members error:", {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      });
+      setStatusMessage(`データ取得エラー: ${error.message}`);
+      return;
     }
-    setNewMemberName("");
-    setIsMemberComposerOpen(false);
-    setStatusMessage("メンバーを追加しました。");
+    setMembers((data ?? []) as Member[]);
+  }
+
+  async function handleDeleteMember(memberId: string) {
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、削除できません。");
+      return;
+    }
+    const { error } = await client.from("members").delete().eq("id", memberId);
+    if (error) {
+      console.error("delete member error:", {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      });
+      setStatusMessage(`メンバー削除エラー: ${error.message}`);
+      return;
+    }
+    await refreshMembers();
+    setStatusMessage("メンバーを削除しました。");
+  }
+
+  async function handleUpdateMemberName(memberId: string) {
+    const trimmed = editMemberName.trim();
+    if (!trimmed) {
+      setStatusMessage("メンバー名を入力してください。");
+      return;
+    }
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、更新できません。");
+      return;
+    }
+    const { error } = await client.from("members").update({ name: trimmed }).eq("id", memberId);
+    if (error) {
+      console.error("update member error:", {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      });
+      setStatusMessage(`メンバー更新エラー: ${error.message}`);
+      return;
+    }
+    setEditMemberId(null);
+    setEditMemberName("");
+    await refreshMembers();
+    setStatusMessage("メンバー名を更新しました。");
   }
 
   async function handleSaveScores(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!supabase) {
+    const client: any = getSupabaseClient();
+    if (!client) {
       setStatusMessage("Supabaseの接続設定がないため、保存できません。");
       return;
     }
@@ -452,7 +637,7 @@ export default function Home() {
         return;
       }
 
-      const { data: existingRounds, error: existingError } = await supabase
+      const { data: existingRounds, error: existingError } = await client
         .from("rounds")
         .select("*")
         .eq("member_id", member.id)
@@ -468,7 +653,7 @@ export default function Home() {
 
       if ((existingRounds ?? []).length > 0) {
         const existingRound = existingRounds?.[0];
-        const { error: updateError } = await supabase.from("rounds").update({ score: scoreValue }).eq("id", existingRound.id);
+        const { error: updateError } = await client.from("rounds").update({ score: scoreValue }).eq("id", existingRound.id);
         if (updateError) {
           setLoading(false);
           setStatusMessage("スコア更新に失敗しました。");
@@ -476,7 +661,7 @@ export default function Home() {
           return;
         }
       } else {
-        const { error: insertError } = await supabase.from("rounds").insert([
+        const { error: insertError } = await client.from("rounds").insert([
           {
             member_id: member.id,
             played_at: newRound.playedAt,
@@ -495,14 +680,15 @@ export default function Home() {
 
     setLoading(false);
     setStatusMessage("スコアを保存しました。");
-    const { data: storedRounds } = await supabase.from("rounds").select("*").order("played_at", { ascending: false });
+    const { data: storedRounds } = await client.from("rounds").select("*").order("played_at", { ascending: false });
     setRounds((storedRounds ?? []) as Round[]);
     setScoreDrafts({});
     setNewRound({ courseName: "", playedAt: defaultPlayedAt });
   }
 
   async function handleSaveChampionshipResult(memberId: string, result: ChampionshipResult) {
-    if (!supabase) {
+    const client: any = getSupabaseClient();
+    if (!client) {
       setStatusMessage("Supabaseの接続設定がないため、保存できません。");
       return;
     }
@@ -513,7 +699,7 @@ export default function Home() {
     };
 
     setChampionshipResults(nextResults);
-    const { error } = await supabase.from("settings").upsert([
+    const { error } = await client.from("settings").upsert([
       { key: "championship_results", value: JSON.stringify(nextResults) },
     ]);
 
@@ -524,6 +710,51 @@ export default function Home() {
     }
 
     setStatusMessage("大会結果を保存しました。");
+  }
+
+  async function handleSaveCompetitionRecord() {
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
+      return;
+    }
+
+    const nextRecord: CompetitionRecord = {
+      id: `${Date.now()}`,
+      date: newRound.playedAt,
+      courseName: newRound.courseName.trim() || "未指定",
+      teams: {
+        A: selectedMemberDetails.slice(0, Math.ceil(selectedMemberDetails.length / 2)).map((stat) => ({
+          memberId: stat.member.id,
+          memberName: stat.member.name,
+          score: 0,
+          rating: stat.rating,
+        })),
+        B: selectedMemberDetails.slice(Math.ceil(selectedMemberDetails.length / 2)).map((stat) => ({
+          memberId: stat.member.id,
+          memberName: stat.member.name,
+          score: 0,
+          rating: stat.rating,
+        })),
+      },
+      teamTotals: { A: 0, B: 0 },
+      scoreTotals: { A: 0, B: 0 },
+      winner: "draw",
+    };
+
+    const nextRecords = [nextRecord, ...competitionRecords];
+    setCompetitionRecords(nextRecords);
+    const { error } = await client.from("settings").upsert([
+      { key: "competitions", value: JSON.stringify(nextRecords) },
+    ]);
+
+    if (error) {
+      setStatusMessage("コンペ記録の保存に失敗しました。");
+      console.error(error);
+      return;
+    }
+
+    setStatusMessage("コンペ記録を保存しました。");
   }
 
   function toggleMemberSelection(memberId: string) {
@@ -559,6 +790,13 @@ export default function Home() {
                     <h2 className="text-[18px] font-semibold text-[#111111]">スコア入力</h2>
                     <p className="mt-1 text-sm text-[#6b7280]">ゴルフ場・日付・参加者・スコアをまとめて保存できます。</p>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditMembersMode((current) => !current)}
+                    className="h-11 whitespace-nowrap rounded-full border border-[#d1d5db] px-4 text-sm font-semibold text-[#111111]"
+                  >
+                    {isEditMembersMode ? "完了" : "編集"}
+                  </button>
                 </div>
 
                 <div className="mt-5 space-y-4">
@@ -612,21 +850,68 @@ export default function Home() {
                       </div>
                     ) : null}
 
-                    <div className="flex flex-wrap gap-2">
-                      {members.map((member) => {
-                        const active = selectedMemberIds.includes(member.id);
-                        return (
-                          <button
-                            key={member.id}
-                            type="button"
-                            onClick={() => toggleMemberSelection(member.id)}
-                            className={`rounded-full border px-3 py-2 text-sm font-semibold ${active ? "border-[#b91c1c] bg-[#fef2f2] text-[#b91c1c]" : "border-[#d1d5db] bg-white text-[#111111]"}`}
-                          >
-                            {member.name}
-                          </button>
-                        );
-                      })}
-                    </div>
+                    {isEditMembersMode ? (
+                      <div className="space-y-2">
+                        {members.map((member) => (
+                          <div key={member.id} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2">
+                            <div className="flex-1">
+                              {editMemberId === member.id ? (
+                                <input
+                                  value={editMemberName}
+                                  onChange={(event) => setEditMemberName(event.target.value)}
+                                  className="h-10 w-full rounded-[12px] border border-[#d1d5db] px-3 text-[16px] text-[#111111]"
+                                />
+                              ) : (
+                                <span className="text-sm font-semibold text-[#111111]">{member.name}</span>
+                              )}
+                            </div>
+                            <div className="ml-3 flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (editMemberId === member.id) {
+                                    handleUpdateMemberName(member.id);
+                                  } else {
+                                    setEditMemberId(member.id);
+                                    setEditMemberName(member.name);
+                                  }
+                                }}
+                                className="flex h-11 min-w-[44px] items-center justify-center rounded-full border border-[#d1d5db] px-3 text-lg"
+                              >
+                                ✎
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (window.confirm("このメンバーを削除しますか？")) {
+                                    handleDeleteMember(member.id);
+                                  }
+                                }}
+                                className="flex h-11 min-w-[44px] items-center justify-center rounded-full bg-[#b91c1c] px-3 text-lg font-semibold text-white"
+                              >
+                                −
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {members.map((member) => {
+                          const active = selectedMemberIds.includes(member.id);
+                          return (
+                            <button
+                              key={member.id}
+                              type="button"
+                              onClick={() => toggleMemberSelection(member.id)}
+                              className={`rounded-full border px-3 py-2 text-sm font-semibold ${active ? "border-[#b91c1c] bg-[#fef2f2] text-[#b91c1c]" : "border-[#d1d5db] bg-white text-[#111111]"}`}
+                            >
+                              {member.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   {selectedMembers.length > 0 ? (
@@ -709,7 +994,7 @@ export default function Home() {
                 )}
               </section>
             </div>
-          ) : (
+          ) : activeTab === "tier" ? (
             <div className="space-y-4">
               <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
                 <div className="flex items-center justify-between gap-3">
@@ -898,6 +1183,96 @@ export default function Home() {
                 </div>
               </section>
             </div>
+          ) : (
+            <div className="space-y-4">
+              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-[18px] font-semibold text-[#111111]">結果</h2>
+                    <p className="mt-1 text-sm text-[#6b7280]">大会結果とコンペモードの記録をまとめて確認できます。</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsCompetitionMode((current) => !current)}
+                    className="h-11 whitespace-nowrap rounded-full bg-[#111111] px-4 text-sm font-semibold text-white"
+                  >
+                    {isCompetitionMode ? "閉じる" : "コンペ開始"}
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                    <p className="text-sm font-semibold text-[#111111]">大会結果のサマリー</p>
+                    <div className="mt-3 space-y-2">
+                      {members.length === 0 ? (
+                        <p className="text-sm text-[#6b7280]">メンバーを登録すると結果を表示できます。</p>
+                      ) : (
+                        members.map((member) => (
+                          <div key={member.id} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm">
+                            <span className="font-semibold text-[#111111]">{member.name}</span>
+                            <span className="text-[#6b7280]">{championshipResults[member.id] === "win" ? "優勝" : championshipResults[member.id] === "runner-up" ? "準優勝" : championshipResults[member.id] === "third" ? "3位" : "未登録"}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                    <p className="text-sm font-semibold text-[#111111]">コンペモード</p>
+                    <p className="mt-1 text-sm text-[#6b7280]">A/Bチームの組み合わせを見ながら、試合結果を残せるようにします。</p>
+                    {isCompetitionMode ? (
+                      <div className="mt-3 space-y-2">
+                        <div className="flex flex-wrap gap-2">
+                          {members.map((member) => {
+                            const active = selectedMemberIds.includes(member.id);
+                            return (
+                              <button key={member.id} type="button" onClick={() => toggleMemberSelection(member.id)} className={`rounded-full border px-3 py-2 text-sm font-semibold ${active ? "border-[#b91c1c] bg-[#fef2f2] text-[#b91c1c]" : "border-[#d1d5db] bg-white text-[#111111]"}`}>
+                                {member.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                            <p className="text-sm font-semibold text-[#111111]">Team A</p>
+                            {selectedMemberDetails.slice(0, Math.ceil(selectedMemberDetails.length / 2)).map((stat) => (
+                              <p key={stat.member.id} className="mt-2 text-sm text-[#111111]">{stat.member.name}</p>
+                            ))}
+                          </div>
+                          <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                            <p className="text-sm font-semibold text-[#111111]">Team B</p>
+                            {selectedMemberDetails.slice(Math.ceil(selectedMemberDetails.length / 2)).map((stat) => (
+                              <p key={stat.member.id} className="mt-2 text-sm text-[#111111]">{stat.member.name}</p>
+                            ))}
+                          </div>
+                        </div>
+                        <button type="button" onClick={handleSaveCompetitionRecord} className="mt-3 h-[44px] w-full rounded-[16px] bg-[#b91c1c] text-sm font-semibold text-white">
+                          記録として保存する
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-sm text-[#6b7280]">トグルを押すと、参加メンバーでチームの見立てを確認できます。</p>
+                    )}
+                  </div>
+
+                  <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                    <p className="text-sm font-semibold text-[#111111]">保存済みコンペ記録</p>
+                    {competitionRecords.length === 0 ? (
+                      <p className="mt-2 text-sm text-[#6b7280]">まだ記録がありません。</p>
+                    ) : (
+                      <div className="mt-3 space-y-2">
+                        {competitionRecords.slice(0, 3).map((record) => (
+                          <div key={record.id} className="rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#111111]">
+                            <p className="font-semibold">{record.courseName} · {record.date}</p>
+                            <p className="mt-1 text-[#6b7280]">A {record.teamTotals.A} / B {record.teamTotals.B}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </section>
+            </div>
           )}
         </main>
       </div>
@@ -909,6 +1284,9 @@ export default function Home() {
           </button>
           <button type="button" onClick={() => setActiveTab("tier")} className={`flex-1 rounded-[16px] px-3 py-3 text-sm font-semibold ${activeTab === "tier" ? "bg-[#fef2f2] text-[#b91c1c]" : "bg-[#1f1f1f] text-[#f5e8e8]"}`}>
             Tier表
+          </button>
+          <button type="button" onClick={() => setActiveTab("results")} className={`flex-1 rounded-[16px] px-3 py-3 text-sm font-semibold ${activeTab === "results" ? "bg-[#fef2f2] text-[#b91c1c]" : "bg-[#1f1f1f] text-[#f5e8e8]"}`}>
+            結果
           </button>
         </div>
       </nav>
