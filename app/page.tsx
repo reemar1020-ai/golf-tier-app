@@ -62,15 +62,19 @@ type CompetitionRecord = {
     A: CompetitionEntry[];
     B: CompetitionEntry[];
   };
-  teamTotals: {
-    A: number;
-    B: number;
-  };
-  scoreTotals: {
+  teamScores: {
     A: number;
     B: number;
   };
   winner: "A" | "B" | "draw";
+  teamTotals?: {
+    A: number;
+    B: number;
+  };
+  scoreTotals?: {
+    A: number;
+    B: number;
+  };
 };
 
 type TeamSplit = {
@@ -307,7 +311,10 @@ export default function Home() {
   const [isCompetitionMode, setIsCompetitionMode] = useState(false);
   const [competitionRecords, setCompetitionRecords] = useState<CompetitionRecord[]>([]);
   const [isCompetitionEditing, setIsCompetitionEditing] = useState(false);
+  const [isCompetitionStarted, setIsCompetitionStarted] = useState(false);
   const [competitionDraftTeams, setCompetitionDraftTeams] = useState<{ A: Member[]; B: Member[] }>({ A: [], B: [] });
+  const [competitionScoreDrafts, setCompetitionScoreDrafts] = useState<Record<string, string>>({});
+  const [expandedCompetitionYear, setExpandedCompetitionYear] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -468,6 +475,59 @@ export default function Home() {
     const selectedStats = stats.filter((stat) => selectedMemberIds.includes(stat.member.id));
     return generateBalancedTeams(selectedStats);
   }, [stats, selectedMemberIds, teamVersion]);
+  const competitionSplitPreview = useMemo(() => {
+    const selectedStats = stats.filter((stat) => selectedMemberIds.includes(stat.member.id));
+    return generateBalancedTeams(selectedStats);
+  }, [stats, selectedMemberIds, teamVersion]);
+  const activeCompetitionTeams = useMemo(() => {
+    if (competitionDraftTeams.A.length > 0 || competitionDraftTeams.B.length > 0) {
+      return competitionDraftTeams;
+    }
+    return {
+      A: competitionSplitPreview.teamA.map((stat) => stat.member),
+      B: competitionSplitPreview.teamB.map((stat) => stat.member),
+    };
+  }, [competitionDraftTeams, competitionSplitPreview]);
+  const competitionTeamRatings = useMemo(() => {
+    const getRating = (member: Member) => stats.find((stat) => stat.member.id === member.id)?.rating ?? 0;
+    return {
+      A: activeCompetitionTeams.A.reduce((sum, member) => sum + getRating(member), 0),
+      B: activeCompetitionTeams.B.reduce((sum, member) => sum + getRating(member), 0),
+    };
+  }, [activeCompetitionTeams, stats]);
+  const groupedCompetitionRecords = useMemo(() => {
+    return competitionRecords.reduce<Record<string, CompetitionRecord[]>>((acc, record) => {
+      const year = record.date.slice(0, 4);
+      if (!acc[year]) acc[year] = [];
+      acc[year].push(record);
+      return acc;
+    }, {});
+  }, [competitionRecords]);
+
+  function handleCompetitionRecalculate() {
+    const split = competitionSplitPreview;
+    setCompetitionDraftTeams({
+      A: split.teamA.map((stat) => stat.member),
+      B: split.teamB.map((stat) => stat.member),
+    });
+    setIsCompetitionEditing(false);
+    setIsCompetitionStarted(false);
+  }
+
+  function handleCompetitionTeamSwap(member: Member, target: "A" | "B") {
+    setCompetitionDraftTeams((current) => {
+      if (target === "A") {
+        return {
+          A: [...current.A.filter((item) => item.id !== member.id), member],
+          B: current.B.filter((item) => item.id !== member.id),
+        };
+      }
+      return {
+        A: current.A.filter((item) => item.id !== member.id),
+        B: [...current.B.filter((item) => item.id !== member.id), member],
+      };
+    });
+  }
 
   async function handleAddMember(event?: FormEvent<HTMLFormElement>) {
     if (event) event.preventDefault();
@@ -679,10 +739,50 @@ export default function Home() {
     }
 
     setLoading(false);
+    if (isCompetitionMode) {
+      const teamScores = {
+        A: activeCompetitionTeams.A.reduce((sum, member) => sum + Number(competitionScoreDrafts[member.id] ?? 0), 0),
+        B: activeCompetitionTeams.B.reduce((sum, member) => sum + Number(competitionScoreDrafts[member.id] ?? 0), 0),
+      };
+      const winner = teamScores.A === teamScores.B ? "draw" : teamScores.A < teamScores.B ? "B" : "A";
+      const nextRecord: CompetitionRecord = {
+        id: `${Date.now()}`,
+        date: newRound.playedAt,
+        courseName: newRound.courseName.trim() || "未指定",
+        teams: {
+          A: activeCompetitionTeams.A.map((member) => ({
+            memberId: member.id,
+            memberName: member.name,
+            score: Number(competitionScoreDrafts[member.id] ?? 0),
+            rating: stats.find((stat) => stat.member.id === member.id)?.rating ?? 0,
+          })),
+          B: activeCompetitionTeams.B.map((member) => ({
+            memberId: member.id,
+            memberName: member.name,
+            score: Number(competitionScoreDrafts[member.id] ?? 0),
+            rating: stats.find((stat) => stat.member.id === member.id)?.rating ?? 0,
+          })),
+        },
+        teamScores,
+        winner,
+      };
+      const nextRecords = [nextRecord, ...competitionRecords];
+      setCompetitionRecords(nextRecords);
+      const { error: competitionError } = await client.from("settings").upsert([
+        { key: "competitions", value: JSON.stringify(nextRecords) },
+      ]);
+      if (competitionError) {
+        setStatusMessage("コンペ記録の保存に失敗しました。")
+        console.error(competitionError);
+        return;
+      }
+    }
+
     setStatusMessage("スコアを保存しました。");
     const { data: storedRounds } = await client.from("rounds").select("*").order("played_at", { ascending: false });
     setRounds((storedRounds ?? []) as Round[]);
     setScoreDrafts({});
+    setCompetitionScoreDrafts({});
     setNewRound({ courseName: "", playedAt: defaultPlayedAt });
   }
 
@@ -737,6 +837,7 @@ export default function Home() {
           rating: stat.rating,
         })),
       },
+      teamScores: { A: 0, B: 0 },
       teamTotals: { A: 0, B: 0 },
       scoreTotals: { A: 0, B: 0 },
       winner: "draw",
@@ -790,13 +891,22 @@ export default function Home() {
                     <h2 className="text-[18px] font-semibold text-[#111111]">スコア入力</h2>
                     <p className="mt-1 text-sm text-[#6b7280]">ゴルフ場・日付・参加者・スコアをまとめて保存できます。</p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setIsEditMembersMode((current) => !current)}
-                    className="h-11 whitespace-nowrap rounded-full border border-[#d1d5db] px-4 text-sm font-semibold text-[#111111]"
-                  >
-                    {isEditMembersMode ? "完了" : "編集"}
-                  </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsCompetitionMode((current) => !current)}
+                      className={`h-11 whitespace-nowrap rounded-full border px-3 text-[13px] font-semibold ${isCompetitionMode ? "border-[#16a34a] bg-[#f0fdf4] text-[#166534]" : "border-[#d1d5db] bg-white text-[#111111]"}`}
+                    >
+                      南高コンペ {isCompetitionMode ? "ON" : "OFF"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditMembersMode((current) => !current)}
+                      className="h-11 whitespace-nowrap rounded-full border border-[#d1d5db] px-4 text-sm font-semibold text-[#111111]"
+                    >
+                      {isEditMembersMode ? "完了" : "編集"}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mt-5 space-y-4">
@@ -820,6 +930,98 @@ export default function Home() {
                       className="mt-2 h-[46px] w-full rounded-[18px] border border-[#d1d5db] bg-[#f9fafb] px-4 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
                     />
                   </label>
+
+                  {isCompetitionMode ? (
+                    <div className="rounded-[24px] border border-[#e5e7eb] bg-[#f8fff8] p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold text-[#111111]">自動チーム分け</p>
+                          <p className="mt-1 text-xs text-[#6b7280]">レート差が小さくなるように分けます。</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" onClick={() => setIsCompetitionEditing((current) => !current)} className="h-10 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#111111]">編集</button>
+                          <button type="button" onClick={handleCompetitionRecalculate} className="h-10 whitespace-nowrap rounded-full bg-[#b91c1c] px-3 text-[13px] font-semibold text-white">再計算</button>
+                          <button type="button" onClick={() => setIsCompetitionStarted(true)} className="h-10 whitespace-nowrap rounded-full bg-[#16a34a] px-3 text-[13px] font-semibold text-white">試合開始</button>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                          <p className="text-sm font-semibold text-[#111111]">Team A</p>
+                          <p className="mt-1 text-xs text-[#6b7280]">合計レート {competitionTeamRatings.A}</p>
+                          <div className="mt-2 space-y-2">
+                            {activeCompetitionTeams.A.map((member) => (
+                              <div key={member.id} className="flex items-center justify-between gap-2 rounded-[12px] border border-[#e5e7eb] bg-[#fafafa] px-2 py-2">
+                                <span className="text-sm text-[#111111]">{member.name}</span>
+                                {isCompetitionEditing ? (
+                                  <button type="button" onClick={() => handleCompetitionTeamSwap(member, "A")} className="rounded-full border border-[#d1d5db] px-2 py-1 text-[12px] font-semibold text-[#111111]">→B</button>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                          <p className="text-sm font-semibold text-[#111111]">Team B</p>
+                          <p className="mt-1 text-xs text-[#6b7280]">合計レート {competitionTeamRatings.B}</p>
+                          <div className="mt-2 space-y-2">
+                            {activeCompetitionTeams.B.map((member) => (
+                              <div key={member.id} className="flex items-center justify-between gap-2 rounded-[12px] border border-[#e5e7eb] bg-[#fafafa] px-2 py-2">
+                                <span className="text-sm text-[#111111]">{member.name}</span>
+                                {isCompetitionEditing ? (
+                                  <button type="button" onClick={() => handleCompetitionTeamSwap(member, "B")} className="rounded-full border border-[#d1d5db] px-2 py-1 text-[12px] font-semibold text-[#111111]">→A</button>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 rounded-[16px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#111111]">
+                        <p>Team A合計レート: {competitionTeamRatings.A}</p>
+                        <p className="mt-1">Team B合計レート: {competitionTeamRatings.B}</p>
+                        <p className="mt-1">レート差: {Math.abs(competitionTeamRatings.A - competitionTeamRatings.B)}</p>
+                      </div>
+
+                      {isCompetitionStarted ? (
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                          <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                            <p className="text-sm font-semibold text-[#111111]">Team A スコア</p>
+                            <div className="mt-2 space-y-2">
+                              {activeCompetitionTeams.A.map((member) => (
+                                <label key={member.id} className="block text-sm text-[#111111]">
+                                  <span className="mb-1 block">{member.name}</span>
+                                  <input
+                                    type="text"
+                                    inputMode="numeric"
+                                    value={competitionScoreDrafts[member.id] ?? ""}
+                                    onChange={(event) => setCompetitionScoreDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
+                                    className="h-[42px] w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                  />
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                            <p className="text-sm font-semibold text-[#111111]">Team B スコア</p>
+                            <div className="mt-2 space-y-2">
+                              {activeCompetitionTeams.B.map((member) => (
+                                <label key={member.id} className="block text-sm text-[#111111]">
+                                  <span className="mb-1 block">{member.name}</span>
+                                  <input
+                                    type="text"
+                                    inputMode="numeric"
+                                    value={competitionScoreDrafts[member.id] ?? ""}
+                                    onChange={(event) => setCompetitionScoreDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
+                                    className="h-[42px] w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                  />
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   <div className="rounded-[24px] border border-[#e5e7eb] bg-[#fafafa] p-3">
                     <div className="mb-3 flex items-center justify-between gap-2">
@@ -1135,19 +1337,57 @@ export default function Home() {
 
                 <div className="mt-4 space-y-3">
                   <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
-                    <p className="text-sm font-semibold text-[#111111]">大会結果のサマリー</p>
-                    <div className="mt-3 space-y-2">
-                      {members.length === 0 ? (
-                        <p className="text-sm text-[#6b7280]">メンバーを登録すると結果を表示できます。</p>
-                      ) : (
-                        members.map((member) => (
-                          <div key={member.id} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm">
-                            <span className="font-semibold text-[#111111]">{member.name}</span>
-                            <span className="text-[#6b7280]">{championshipResults[member.id] === "win" ? "優勝" : championshipResults[member.id] === "runner-up" ? "準優勝" : championshipResults[member.id] === "third" ? "3位" : "未登録"}</span>
-                          </div>
-                        ))
-                      )}
-                    </div>
+                    <p className="text-sm font-semibold text-[#111111]">大会結果</p>
+                    {competitionRecords.length === 0 ? (
+                      <p className="mt-2 text-sm text-[#6b7280]">まだ大会結果がありません。</p>
+                    ) : (
+                      <div className="mt-3 space-y-3">
+                        {Object.entries(groupedCompetitionRecords)
+                          .sort(([a], [b]) => Number(b) - Number(a))
+                          .map(([year, records]) => {
+                            const isOpen = expandedCompetitionYear === year;
+                            return (
+                              <div key={year} className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                                <button type="button" onClick={() => setExpandedCompetitionYear(isOpen ? null : year)} className="flex w-full items-center justify-between gap-3 text-left">
+                                  <span className="text-sm font-semibold text-[#111111]">{year}年</span>
+                                  <span className="rounded-full bg-[#111111] px-3 py-1 text-[12px] font-semibold text-white">{records.length}件</span>
+                                </button>
+                                {isOpen ? (
+                                  <div className="mt-3 space-y-2">
+                                    {records.slice().sort((a, b) => b.date.localeCompare(a.date)).map((record) => {
+                                      const rankLabel = record.winner === "A" ? "優勝" : record.winner === "B" ? "準優勝" : "引き分け";
+                                      const rankBadgeClass = record.winner === "A" ? "bg-[#fef3c7] text-[#92400e]" : record.winner === "B" ? "bg-[#e5e7eb] text-[#374151]" : "bg-[#f3f4f6] text-[#111111]";
+                                      return (
+                                        <div key={record.id} className="rounded-[14px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                                          <div className="flex items-center justify-between gap-2">
+                                            <div>
+                                              <p className="text-sm font-semibold text-[#111111]">{record.courseName}</p>
+                                              <p className="mt-1 text-[12px] text-[#6b7280]">{record.date}</p>
+                                            </div>
+                                            <span className={`rounded-full px-2 py-1 text-[12px] font-semibold ${rankBadgeClass}`}>{rankLabel}</span>
+                                          </div>
+                                          <div className="mt-2 grid gap-2 text-sm text-[#111111] sm:grid-cols-2">
+                                            <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-2">
+                                              <p className="font-semibold">Team A</p>
+                                              <p className="mt-1">合計 {record.teamScores.A}</p>
+                                              {record.teams.A.map((entry) => <p key={entry.memberId} className="mt-1 text-[#6b7280]">{entry.memberName}: {entry.score}</p>)}
+                                            </div>
+                                            <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-2">
+                                              <p className="font-semibold">Team B</p>
+                                              <p className="mt-1">合計 {record.teamScores.B}</p>
+                                              {record.teams.B.map((entry) => <p key={entry.memberId} className="mt-1 text-[#6b7280]">{entry.memberName}: {entry.score}</p>)}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                      </div>
+                    )}
                   </div>
 
                   <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
@@ -1197,7 +1437,7 @@ export default function Home() {
                         {competitionRecords.slice(0, 3).map((record) => (
                           <div key={record.id} className="rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#111111]">
                             <p className="font-semibold">{record.courseName} · {record.date}</p>
-                            <p className="mt-1 text-[#6b7280]">A {record.teamTotals.A} / B {record.teamTotals.B}</p>
+                            <p className="mt-1 text-[#6b7280]">A {record.teamScores.A} / B {record.teamScores.B}</p>
                           </div>
                         ))}
                       </div>
