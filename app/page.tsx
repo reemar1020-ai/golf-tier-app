@@ -823,17 +823,26 @@ export default function Home() {
 
                   <div className="rounded-[24px] border border-[#e5e7eb] bg-[#fafafa] p-3">
                     <div className="mb-3 flex items-center justify-between gap-2">
-                      <div>
+                      <div className="min-w-0">
                         <p className="text-sm font-semibold text-[#111111]">メンバー</p>
                         <p className="text-xs text-[#6b7280]">複数選択してスコアを入力できます。</p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setIsMemberComposerOpen((open) => !open)}
-                        className="flex h-[44px] min-w-[44px] items-center justify-center rounded-full bg-[#111111] px-3 text-lg font-semibold text-white"
-                      >
-                        +
-                      </button>
+                      <div className="flex shrink-0 flex-nowrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setIsEditMembersMode((current) => !current)}
+                          className="flex h-11 min-w-[56px] items-center justify-center whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#111111]"
+                        >
+                          編集
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsMemberComposerOpen((open) => !open)}
+                          className="flex h-11 min-w-[44px] items-center justify-center rounded-full bg-[#111111] px-3 text-lg font-semibold text-white"
+                        >
+                          +
+                        </button>
+                      </div>
                     </div>
 
                     {isMemberComposerOpen ? (
@@ -968,9 +977,10 @@ export default function Home() {
                               <p className="text-sm font-semibold text-[#111111]">{formatDate(group.date)}</p>
                               <p className="mt-1 text-sm text-[#6b7280]">{group.course}</p>
                             </div>
-                            <div className="text-right">
-                              <p className="text-sm font-semibold text-[#b91c1c]">最少 {group.minScore}</p>
-                              <p className="mt-1 text-xs text-[#6b7280]">{group.entries[0]?.memberName || "-"}</p>
+                            <div className="min-w-[132px] text-right">
+                              <p className="text-[13px] font-semibold leading-5 text-[#b91c1c]">🏆 ベストスコア</p>
+                              <p className="mt-1 text-sm font-semibold text-[#111111]">{group.minScore}</p>
+                              <p className="mt-1 text-[12px] text-[#6b7280]">{group.minMemberName || "-"}</p>
                             </div>
                           </button>
 
@@ -1105,83 +1115,6 @@ export default function Home() {
                 ) : null}
               </section>
 
-              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-[18px] font-semibold text-[#111111]">自動チーム分け</h2>
-                    <p className="mt-1 text-sm text-[#6b7280]">対象メンバーを選んで2チームへ自動分けします。</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setExpandedDetail((current) => (current === "teams" ? null : "teams"))}
-                    className="rounded-full bg-[#111111] whitespace-nowrap min-w-[56px] h-11 px-4 text-sm flex items-center justify-center flex-shrink-0 font-semibold text-white"
-                  >
-                    {expandedDetail === "teams" ? "閉じる" : "開く"}
-                  </button>
-                </div>
-                {expandedDetail === "teams" ? (
-                  <div className="mt-4 space-y-4">
-                    <div className="flex flex-wrap gap-2">
-                      {members.map((member) => {
-                        const active = selectedMemberIds.includes(member.id);
-                        return (
-                          <button key={member.id} type="button" onClick={() => toggleMemberSelection(member.id)} className={`rounded-full border px-3 py-2 text-sm font-semibold ${active ? "border-[#b91c1c] bg-[#fef2f2] text-[#b91c1c]" : "border-[#d1d5db] bg-white text-[#111111]"}`}>
-                            {member.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
-                          <p className="text-sm font-semibold text-[#111111]">Team A</p>
-                          {teamSplit.teamA.length === 0 ? <p className="mt-2 text-sm text-[#6b7280]">未選択</p> : teamSplit.teamA.map((stat) => <p key={stat.member.id} className="mt-2 text-sm text-[#111111]">{stat.member.name}</p>)}
-                        </div>
-                        <div className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
-                          <p className="text-sm font-semibold text-[#111111]">Team B</p>
-                          {teamSplit.teamB.length === 0 ? <p className="mt-2 text-sm text-[#6b7280]">未選択</p> : teamSplit.teamB.map((stat) => <p key={stat.member.id} className="mt-2 text-sm text-[#111111]">{stat.member.name}</p>)}
-                        </div>
-                      </div>
-                      <div className="mt-3 rounded-[16px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#111111]">
-                        <p>Team A合計: {teamSplit.totals.teamA}</p>
-                        <p className="mt-1">Team B合計: {teamSplit.totals.teamB}</p>
-                        <p className="mt-1">レート差: {teamSplit.difference}</p>
-                      </div>
-                    </div>
-
-                    <button type="button" onClick={() => setTeamVersion((current) => current + 1)} className="h-[44px] w-full rounded-[16px] bg-[#b91c1c] text-sm font-semibold text-white">
-                      再計算する
-                    </button>
-                  </div>
-                ) : null}
-              </section>
-
-              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-[18px] font-semibold text-[#111111]">大会結果</h2>
-                    <p className="mt-1 text-sm text-[#6b7280]">昨年の年末コンペ結果を入力できます。</p>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  {members.map((member) => (
-                    <label key={member.id} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] px-3 py-3 text-sm">
-                      <span className="font-semibold text-[#111111]">{member.name}</span>
-                      <select
-                        value={championshipResults[member.id] ?? "none"}
-                        onChange={(event) => handleSaveChampionshipResult(member.id, event.target.value as ChampionshipResult)}
-                        className="rounded-[12px] border border-[#d1d5db] bg-white px-2 py-2 text-sm text-[#111111]"
-                      >
-                        <option value="none">なし</option>
-                        <option value="third">3位</option>
-                        <option value="runner-up">準優勝</option>
-                        <option value="win">優勝</option>
-                      </select>
-                    </label>
-                  ))}
-                </div>
-              </section>
             </div>
           ) : (
             <div className="space-y-4">
