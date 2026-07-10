@@ -86,9 +86,134 @@ type TeamSplit = {
 
 const defaultPlayedAt = new Date().toISOString().slice(0, 10);
 
-function parseCompetitions(value: unknown): CompetitionRecord[] {
+function normalizeMembers(value: unknown): Member[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((item): item is CompetitionRecord => Boolean(item && typeof item === "object"));
+  return value.reduce<Member[]>((acc, item) => {
+    if (!item || typeof item !== "object") return acc;
+    const candidate = item as Record<string, unknown>;
+    const id = typeof candidate.id === "string" ? candidate.id : "";
+    const name = typeof candidate.name === "string" ? candidate.name : "";
+    const createdAt = typeof candidate.created_at === "string" ? candidate.created_at : "";
+    if (!id || !name) return acc;
+    acc.push({ id, name, created_at: createdAt });
+    return acc;
+  }, []);
+}
+
+function normalizeRounds(value: unknown): Round[] {
+  if (!Array.isArray(value)) return [];
+  return value.reduce<Round[]>((acc, item) => {
+    if (!item || typeof item !== "object") return acc;
+    const candidate = item as Record<string, unknown>;
+    const id = typeof candidate.id === "string" ? candidate.id : "";
+    const memberId = typeof candidate.member_id === "string" ? candidate.member_id : "";
+    const playedAt = typeof candidate.played_at === "string" ? candidate.played_at : "";
+    const courseName = typeof candidate.course_name === "string" ? candidate.course_name : "";
+    const numericScore = Number(candidate.score);
+    const score = Number.isFinite(numericScore) ? numericScore : 0;
+    const createdAt = typeof candidate.created_at === "string" ? candidate.created_at : "";
+    if (!id || !memberId || !playedAt || !courseName) return acc;
+    acc.push({ id, member_id: memberId, played_at: playedAt, course_name: courseName, score, created_at: createdAt });
+    return acc;
+  }, []);
+}
+
+function normalizeCompetitionEntry(value: unknown): CompetitionEntry | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  const memberId = typeof candidate.memberId === "string" ? candidate.memberId : "";
+  const memberName = typeof candidate.memberName === "string" ? candidate.memberName : "名前未登録";
+  const numericScore = Number(candidate.score);
+  const numericRating = Number(candidate.rating);
+  return {
+    memberId,
+    memberName,
+    score: Number.isFinite(numericScore) ? numericScore : 0,
+    rating: Number.isFinite(numericRating) ? numericRating : 0,
+  };
+}
+
+function normalizeCompetitionRecord(value: unknown): CompetitionRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  const rawTeams = candidate.teams && typeof candidate.teams === "object" ? (candidate.teams as Record<string, unknown>) : {};
+  const rawTeamScores = candidate.teamScores && typeof candidate.teamScores === "object" ? (candidate.teamScores as Record<string, unknown>) : {};
+  const rawTeamTotals = candidate.teamTotals && typeof candidate.teamTotals === "object" ? (candidate.teamTotals as Record<string, unknown>) : {};
+  const rawScoreTotals = candidate.scoreTotals && typeof candidate.scoreTotals === "object" ? (candidate.scoreTotals as Record<string, unknown>) : {};
+  const teamA = Array.isArray(rawTeams.A)
+    ? rawTeams.A.map(normalizeCompetitionEntry).filter((item): item is CompetitionEntry => item !== null)
+    : [];
+  const teamB = Array.isArray(rawTeams.B)
+    ? rawTeams.B.map(normalizeCompetitionEntry).filter((item): item is CompetitionEntry => item !== null)
+    : [];
+  const numericTeamAScore = Number(rawTeamScores.A);
+  const numericTeamBScore = Number(rawTeamScores.B);
+  const winnerValue = candidate.winner;
+  const winner = winnerValue === "A" || winnerValue === "B" || winnerValue === "draw" ? winnerValue : "draw";
+
+  return {
+    id: typeof candidate.id === "string" ? candidate.id : `${Date.now()}`,
+    date: typeof candidate.date === "string" ? candidate.date : "",
+    courseName: typeof candidate.courseName === "string" ? candidate.courseName : "未指定",
+    teams: { A: teamA, B: teamB },
+    teamScores: {
+      A: Number.isFinite(numericTeamAScore) ? numericTeamAScore : 0,
+      B: Number.isFinite(numericTeamBScore) ? numericTeamBScore : 0,
+    },
+    winner,
+    teamTotals: {
+      A: Number.isFinite(Number(rawTeamTotals.A)) ? Number(rawTeamTotals.A) : 0,
+      B: Number.isFinite(Number(rawTeamTotals.B)) ? Number(rawTeamTotals.B) : 0,
+    },
+    scoreTotals: {
+      A: Number.isFinite(Number(rawScoreTotals.A)) ? Number(rawScoreTotals.A) : 0,
+      B: Number.isFinite(Number(rawScoreTotals.B)) ? Number(rawScoreTotals.B) : 0,
+    },
+  };
+}
+
+function normalizeCompetitions(value: unknown): CompetitionRecord[] {
+  if (Array.isArray(value)) {
+    return value.reduce<CompetitionRecord[]>((acc, item) => {
+      const normalized = normalizeCompetitionRecord(item);
+      if (normalized) acc.push(normalized);
+      return acc;
+    }, []);
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return normalizeCompetitions(parsed);
+    } catch (error) {
+      console.error("Results tab render error:", error);
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function normalizeChampionshipResults(value: unknown): Record<string, ChampionshipResult> {
+  if (typeof value === "string") {
+    try {
+      return normalizeChampionshipResults(JSON.parse(value));
+    } catch (error) {
+      console.error("Results tab render error:", error);
+      return {};
+    }
+  }
+
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).reduce<Record<string, ChampionshipResult>>((acc, [memberId, result]) => {
+      if (result === "win" || result === "runner-up" || result === "third" || result === "none") {
+        acc[memberId] = result;
+      }
+      return acc;
+    }, {});
+  }
+
+  return {};
 }
 
 function formatDate(value: string | null | undefined) {
@@ -191,7 +316,8 @@ function groupRoundsByDateAndCourse(rounds: Round[], members: Member[]) {
   const grouped = new Map<string, RoundGroup>();
 
   rounds.forEach((round) => {
-    const key = `${round.played_at}::${round.course_name}`;
+    if (!round || typeof round !== "object") return;
+    const key = `${round.played_at || ""}::${round.course_name || ""}`;
     if (!grouped.has(key)) {
       grouped.set(key, {
         date: round.played_at,
@@ -388,14 +514,7 @@ export default function Home() {
       });
       if (storedResults) {
         const setting = storedResults as { value?: unknown };
-        if (typeof setting.value === "string") {
-          try {
-            const parsed = JSON.parse(setting.value) as Record<string, ChampionshipResult>;
-            setChampionshipResults(parsed);
-          } catch {
-            setChampionshipResults({});
-          }
-        }
+        setChampionshipResults(normalizeChampionshipResults(setting.value));
       }
 
       const storedCompetitions = storedSettingsRows.find((row) => {
@@ -404,14 +523,7 @@ export default function Home() {
       });
       if (storedCompetitions) {
         const setting = storedCompetitions as { value?: unknown };
-        if (typeof setting.value === "string") {
-          try {
-            const parsed = JSON.parse(setting.value) as CompetitionRecord[];
-            setCompetitionRecords(parsed);
-          } catch {
-            setCompetitionRecords([]);
-          }
-        }
+        setCompetitionRecords(normalizeCompetitions(setting.value));
       }
 
       setStatusMessage(null);
@@ -422,9 +534,13 @@ export default function Home() {
 
   const [championshipResults, setChampionshipResults] = useState<Record<string, ChampionshipResult>>({});
 
+  const safeMembers = useMemo(() => normalizeMembers(members), [members]);
+  const safeRounds = useMemo(() => normalizeRounds(rounds), [rounds]);
+  const safeCompetitionRecords = useMemo(() => normalizeCompetitions(competitionRecords), [competitionRecords]);
+
   const stats = useMemo<MemberStats[]>(() => {
-    return members.map((member) => {
-      const memberRounds = rounds
+    return safeMembers.map((member) => {
+      const memberRounds = safeRounds
         .filter((round) => round.member_id === member.id)
         .sort((a, b) => new Date(b.played_at).getTime() - new Date(a.played_at).getTime());
 
@@ -454,9 +570,9 @@ export default function Home() {
         tier,
       };
     });
-  }, [members, rounds, championshipResults]);
+  }, [safeMembers, safeRounds, championshipResults]);
 
-  const roundGroups = useMemo(() => groupRoundsByDateAndCourse(rounds, members), [rounds, members]);
+  const roundGroups = useMemo(() => groupRoundsByDateAndCourse(safeRounds, safeMembers), [safeRounds, safeMembers]);
 
   const tierGroups = useMemo(() => {
     const groups = { S: [] as MemberStats[], A: [] as MemberStats[], B: [] as MemberStats[], C: [] as MemberStats[] };
@@ -496,13 +612,20 @@ export default function Home() {
     };
   }, [activeCompetitionTeams, stats]);
   const groupedCompetitionRecords = useMemo(() => {
-    return competitionRecords.reduce<Record<string, CompetitionRecord[]>>((acc, record) => {
-      const year = record.date.slice(0, 4);
+    return safeCompetitionRecords.reduce<Record<string, CompetitionRecord[]>>((acc, record) => {
+      const dateValue = typeof record.date === "string" ? record.date.trim() : "";
+      let year = "日付不明";
+      if (dateValue) {
+        const parsedDate = new Date(dateValue);
+        if (!Number.isNaN(parsedDate.getTime())) {
+          year = parsedDate.getFullYear().toString();
+        }
+      }
       if (!acc[year]) acc[year] = [];
       acc[year].push(record);
       return acc;
     }, {});
-  }, [competitionRecords]);
+  }, [safeCompetitionRecords]);
 
   function handleCompetitionRecalculate() {
     const split = competitionSplitPreview;
@@ -862,7 +985,7 @@ export default function Home() {
     setSelectedMemberIds((current) => (current.includes(memberId) ? current.filter((id) => id !== memberId) : [...current, memberId]));
   }
 
-  const selectedMembers = useMemo(() => members.filter((member) => selectedMemberIds.includes(member.id)), [members, selectedMemberIds]);
+  const selectedMembers = useMemo(() => safeMembers.filter((member) => selectedMemberIds.includes(member.id)), [safeMembers, selectedMemberIds]);
   const selectedMemberDetails = useMemo(() => stats.filter((stat) => selectedMemberIds.includes(stat.member.id)), [stats, selectedMemberIds]);
   const activeRankingMember = stats.find((stat) => stat.member.id === selectedRankingMemberId) ?? null;
 
@@ -1336,9 +1459,15 @@ export default function Home() {
                 </div>
 
                 <div className="mt-4 space-y-3">
+                  {!safeRounds.length && !safeCompetitionRecords.length ? (
+                    <div className="rounded-[20px] border border-dashed border-[#d1d5db] p-5 text-sm text-[#6b7280]">
+                      まだラウンド履歴または大会結果がありません
+                    </div>
+                  ) : null}
+
                   <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
                     <p className="text-sm font-semibold text-[#111111]">大会結果</p>
-                    {competitionRecords.length === 0 ? (
+                    {safeCompetitionRecords.length === 0 ? (
                       <p className="mt-2 text-sm text-[#6b7280]">まだ大会結果がありません。</p>
                     ) : (
                       <div className="mt-3 space-y-3">
@@ -1396,7 +1525,7 @@ export default function Home() {
                     {isCompetitionMode ? (
                       <div className="mt-3 space-y-2">
                         <div className="flex flex-wrap gap-2">
-                          {members.map((member) => {
+                          {safeMembers.map((member) => {
                             const active = selectedMemberIds.includes(member.id);
                             return (
                               <button key={member.id} type="button" onClick={() => toggleMemberSelection(member.id)} className={`rounded-full border px-3 py-2 text-sm font-semibold ${active ? "border-[#b91c1c] bg-[#fef2f2] text-[#b91c1c]" : "border-[#d1d5db] bg-white text-[#111111]"}`}>
@@ -1430,11 +1559,11 @@ export default function Home() {
 
                   <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
                     <p className="text-sm font-semibold text-[#111111]">保存済みコンペ記録</p>
-                    {competitionRecords.length === 0 ? (
+                    {safeCompetitionRecords.length === 0 ? (
                       <p className="mt-2 text-sm text-[#6b7280]">まだ記録がありません。</p>
                     ) : (
                       <div className="mt-3 space-y-2">
-                        {competitionRecords.slice(0, 3).map((record) => (
+                        {safeCompetitionRecords.slice(0, 3).map((record) => (
                           <div key={record.id} className="rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#111111]">
                             <p className="font-semibold">{record.courseName} · {record.date}</p>
                             <p className="mt-1 text-[#6b7280]">A {record.teamScores.A} / B {record.teamScores.B}</p>
