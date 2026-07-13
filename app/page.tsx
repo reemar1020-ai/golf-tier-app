@@ -584,6 +584,8 @@ export default function Home() {
   const [expandedCompetitionId, setExpandedCompetitionId] = useState<string | null>(null);
   const [editCompetitionId, setEditCompetitionId] = useState<string | null>(null);
   const [competitionEditDrafts, setCompetitionEditDrafts] = useState<Record<string, CompetitionEditDraft>>({});
+  const [isCompetitionSettingsSaving, setIsCompetitionSettingsSaving] = useState(false);
+  const [isCompetitionSettingsDeleting, setIsCompetitionSettingsDeleting] = useState(false);
   const [editingRoundGroupId, setEditingRoundGroupId] = useState<string | null>(null);
   const [roundGroupDrafts, setRoundGroupDrafts] = useState<Record<string, RoundGroupEditDraft>>({});
 
@@ -822,14 +824,83 @@ export default function Home() {
       return false;
     }
 
-    const { data, error } = await client.from("settings").select("*").eq("key", "competitions").maybeSingle();
-    if (error) {
-      setStatusMessage(`エラー: ${error.message}`);
+    const { data: settingRow, error: fetchError } = await client
+      .from("settings")
+      .select("id, key, value")
+      .eq("key", "competitions")
+      .maybeSingle();
+    if (fetchError) {
+      console.error("competition settings update error:", {
+        message: fetchError.message,
+        code: fetchError.code,
+        details: fetchError.details,
+        hint: fetchError.hint,
+      });
+      setStatusMessage(`大会結果の更新に失敗しました: ${fetchError.message}`);
       return false;
     }
 
-    const value = (data as { value?: unknown } | null)?.value;
+    const value = (settingRow as { value?: unknown } | null)?.value;
     setCompetitionRecords(normalizeCompetitions(value));
+    return true;
+  }
+
+  async function saveCompetitionsToSettings(updatedCompetitions: CompetitionRecord[]) {
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
+      return false;
+    }
+
+    const { data: settingRow, error: fetchError } = await client
+      .from("settings")
+      .select("id, key, value")
+      .eq("key", "competitions")
+      .maybeSingle();
+
+    if (fetchError) {
+      console.error("competition settings update error:", {
+        message: fetchError.message,
+        code: fetchError.code,
+        details: fetchError.details,
+        hint: fetchError.hint,
+      });
+      setStatusMessage(`大会結果の更新に失敗しました: ${fetchError.message}`);
+      return false;
+    }
+
+    const payload = JSON.stringify(updatedCompetitions);
+    if (!settingRow) {
+      const { error: insertError } = await client.from("settings").insert([{ key: "competitions", value: payload }]);
+      if (insertError) {
+        console.error("competition settings update error:", {
+          message: insertError.message,
+          code: insertError.code,
+          details: insertError.details,
+          hint: insertError.hint,
+        });
+        setStatusMessage(`大会結果の更新に失敗しました: ${insertError.message}`);
+        return false;
+      }
+      return true;
+    }
+
+    const { error: updateError } = await client
+      .from("settings")
+      .update({ value: payload })
+      .eq("key", "competitions");
+
+    if (updateError) {
+      console.error("competition settings update error:", {
+        message: updateError.message,
+        code: updateError.code,
+        details: updateError.details,
+        hint: updateError.hint,
+      });
+      setStatusMessage(`大会結果の更新に失敗しました: ${updateError.message}`);
+      return false;
+    }
+
     return true;
   }
 
@@ -850,6 +921,7 @@ export default function Home() {
   }
 
   async function handleSaveCompetitionEdit(record: CompetitionRecord) {
+    if (isCompetitionSettingsSaving || isCompetitionSettingsDeleting) return;
     const client: any = getSupabaseClient();
     if (!client) {
       setStatusMessage("Supabaseの接続設定がないため、保存できません。");
@@ -895,19 +967,27 @@ export default function Home() {
     };
 
     const nextRecords = safeCompetitionRecords.map((item) => (item.id === record.id ? nextRecord : item));
-    const { error } = await client.from("settings").upsert([{ key: "competitions", value: JSON.stringify(nextRecords) }]);
-    if (error) {
-      setStatusMessage(`エラー: ${error.message}`);
+    setIsCompetitionSettingsSaving(true);
+    const saved = await saveCompetitionsToSettings(nextRecords);
+    if (!saved) {
+      setIsCompetitionSettingsSaving(false);
       return;
     }
 
     const refreshed = await refreshCompetitionRecords();
+    setIsCompetitionSettingsSaving(false);
     if (!refreshed) return;
     setEditCompetitionId(null);
+    setCompetitionEditDrafts((current) => {
+      const next = { ...current };
+      delete next[record.id];
+      return next;
+    });
     setStatusMessage("大会結果を更新しました。");
   }
 
   async function handleDeleteCompetitionRecord(recordId: string) {
+    if (isCompetitionSettingsSaving || isCompetitionSettingsDeleting) return;
     if (!window.confirm("この大会結果を削除しますか？")) {
       return;
     }
@@ -919,16 +999,23 @@ export default function Home() {
     }
 
     const nextRecords = safeCompetitionRecords.filter((item) => item.id !== recordId);
-    const { error } = await client.from("settings").upsert([{ key: "competitions", value: JSON.stringify(nextRecords) }]);
-    if (error) {
-      setStatusMessage(`エラー: ${error.message}`);
+    setIsCompetitionSettingsDeleting(true);
+    const saved = await saveCompetitionsToSettings(nextRecords);
+    if (!saved) {
+      setIsCompetitionSettingsDeleting(false);
       return;
     }
 
     const refreshed = await refreshCompetitionRecords();
+    setIsCompetitionSettingsDeleting(false);
     if (!refreshed) return;
     setExpandedCompetitionId((current) => (current === recordId ? null : current));
     setEditCompetitionId((current) => (current === recordId ? null : current));
+    setCompetitionEditDrafts((current) => {
+      const next = { ...current };
+      delete next[recordId];
+      return next;
+    });
     setStatusMessage("大会結果を削除しました。");
   }
 
@@ -1306,13 +1393,9 @@ export default function Home() {
       };
       const nextRecords = [nextRecord, ...competitionRecords];
       setCompetitionRecords(nextRecords);
-      const { error: competitionError } = await client.from("settings").upsert([
-        { key: "competitions", value: JSON.stringify(nextRecords) },
-      ]);
-      if (competitionError) {
+      const saved = await saveCompetitionsToSettings(nextRecords);
+      if (!saved) {
         setLoading(false);
-        setStatusMessage("コンペ記録の保存に失敗しました。");
-        console.error(competitionError);
         return;
       }
 
@@ -1453,13 +1536,9 @@ export default function Home() {
 
     const nextRecords = [nextRecord, ...competitionRecords];
     setCompetitionRecords(nextRecords);
-    const { error } = await client.from("settings").upsert([
-      { key: "competitions", value: JSON.stringify(nextRecords) },
-    ]);
+    const saved = await saveCompetitionsToSettings(nextRecords);
 
-    if (error) {
-      setStatusMessage("コンペ記録の保存に失敗しました。");
-      console.error(error);
+    if (!saved) {
       return;
     }
 
@@ -2186,9 +2265,9 @@ export default function Home() {
                                       </div>
 
                                       <div className="flex flex-wrap gap-2">
-                                        <button type="button" onClick={() => handleSaveCompetitionEdit(record)} className="h-11 rounded-[12px] bg-[#111111] px-4 text-sm font-semibold text-white">保存</button>
+                                        <button type="button" disabled={isCompetitionSettingsSaving || isCompetitionSettingsDeleting} onClick={() => handleSaveCompetitionEdit(record)} className="h-11 rounded-[12px] bg-[#111111] px-4 text-sm font-semibold text-white disabled:opacity-60">保存</button>
                                         <button type="button" onClick={() => handleCancelCompetitionEdit(record)} className="h-11 rounded-[12px] border border-[#d1d5db] bg-white px-4 text-sm font-semibold text-[#111111]">キャンセル</button>
-                                        <button type="button" onClick={() => handleDeleteCompetitionRecord(record.id)} className="h-11 rounded-[12px] bg-[#b91c1c] px-4 text-sm font-semibold text-white">大会結果削除</button>
+                                        <button type="button" disabled={isCompetitionSettingsSaving || isCompetitionSettingsDeleting} onClick={() => handleDeleteCompetitionRecord(record.id)} className="h-11 rounded-[12px] bg-[#b91c1c] px-4 text-sm font-semibold text-white disabled:opacity-60">大会結果削除</button>
                                       </div>
                                     </div>
                                   ) : (
