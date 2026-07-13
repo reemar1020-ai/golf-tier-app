@@ -4,6 +4,10 @@
             "approve": true,
             "matchCommandLine": true
         },
-        "Get-Process": true
+        "Get-Process": true,
+        "/^cmd /c \"if exist \\.next \\(rmdir /s /q \\.next\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }

@@ -938,13 +938,144 @@ export default function Home() {
       return;
     }
 
-    const selectedMembers = members.filter((member) => selectedMemberIds.includes(member.id));
-    if (selectedMembers.length === 0 || !newRound.courseName.trim()) {
-      setStatusMessage("メンバーとゴルフ場を選択してください。");
+    const courseName = newRound.courseName.trim();
+    const playedAt = newRound.playedAt.trim();
+    if (!courseName || !playedAt) {
+      setStatusMessage("ゴルフ場と日付を入力してください。");
       return;
     }
 
     setLoading(true);
+
+    if (isCompetitionMode) {
+      const teamA = activeCompetitionTeams.A;
+      const teamB = activeCompetitionTeams.B;
+      const competitionMembers = [...teamA, ...teamB];
+
+      if (teamA.length === 0 || teamB.length === 0 || competitionMembers.length === 0) {
+        setLoading(false);
+        setStatusMessage("チーム未確定のため保存できません。");
+        return;
+      }
+
+      if (!isCompetitionStarted) {
+        setLoading(false);
+        setStatusMessage("試合開始後にスコアを入力して保存してください。");
+        return;
+      }
+
+      const scoreByMemberId: Record<string, number> = {};
+      for (const member of competitionMembers) {
+        const scoreText = competitionScoreDrafts[member.id] ?? "";
+        const scoreValue = Number(scoreText);
+        if (!scoreText.trim() || !Number.isFinite(scoreValue) || scoreValue <= 0) {
+          setLoading(false);
+          setStatusMessage("コンペ参加メンバー全員のスコアを正しく入力してください。");
+          return;
+        }
+        scoreByMemberId[member.id] = scoreValue;
+      }
+
+      for (const member of competitionMembers) {
+        const scoreValue = scoreByMemberId[member.id];
+        const { data: existingRounds, error: existingError } = await client
+          .from("rounds")
+          .select("*")
+          .eq("member_id", member.id)
+          .eq("played_at", playedAt)
+          .eq("course_name", courseName);
+
+        if (existingError) {
+          setLoading(false);
+          setStatusMessage("スコア保存中にエラーが発生しました。再度お試しください。");
+          console.error(existingError);
+          return;
+        }
+
+        if ((existingRounds ?? []).length > 0) {
+          const existingRound = existingRounds?.[0];
+          const { error: updateError } = await client.from("rounds").update({ score: scoreValue }).eq("id", existingRound.id);
+          if (updateError) {
+            setLoading(false);
+            setStatusMessage("スコア更新に失敗しました。");
+            console.error(updateError);
+            return;
+          }
+        } else {
+          const { error: insertError } = await client.from("rounds").insert([
+            {
+              member_id: member.id,
+              played_at: playedAt,
+              course_name: courseName,
+              score: scoreValue,
+            },
+          ]);
+          if (insertError) {
+            setLoading(false);
+            setStatusMessage("スコア登録に失敗しました。");
+            console.error(insertError);
+            return;
+          }
+        }
+      }
+
+      const teamScores = {
+        A: teamA.reduce((sum, member) => sum + scoreByMemberId[member.id], 0),
+        B: teamB.reduce((sum, member) => sum + scoreByMemberId[member.id], 0),
+      };
+      const winner = teamScores.A === teamScores.B ? "draw" : teamScores.A < teamScores.B ? "A" : "B";
+      const nextRecord: CompetitionRecord = {
+        id: `${Date.now()}`,
+        date: playedAt,
+        courseName,
+        teams: {
+          A: teamA.map((member) => ({
+            memberId: member.id,
+            memberName: member.name,
+            score: scoreByMemberId[member.id],
+            rating: stats.find((stat) => stat.member.id === member.id)?.rating ?? 0,
+          })),
+          B: teamB.map((member) => ({
+            memberId: member.id,
+            memberName: member.name,
+            score: scoreByMemberId[member.id],
+            rating: stats.find((stat) => stat.member.id === member.id)?.rating ?? 0,
+          })),
+        },
+        teamScores,
+        winner,
+      };
+      const nextRecords = [nextRecord, ...competitionRecords];
+      setCompetitionRecords(nextRecords);
+      const { error: competitionError } = await client.from("settings").upsert([
+        { key: "competitions", value: JSON.stringify(nextRecords) },
+      ]);
+      if (competitionError) {
+        setLoading(false);
+        setStatusMessage("コンペ記録の保存に失敗しました。");
+        console.error(competitionError);
+        return;
+      }
+
+      await refreshRounds();
+      setLoading(false);
+      setStatusMessage("スコアを保存しました。");
+      setCompetitionScoreDrafts({});
+      setScoreDrafts({});
+      setIsCompetitionStarted(false);
+      setIsCompetitionEditing(false);
+      setCompetitionDraftTeams({ A: [], B: [] });
+      setNewRound({ courseName: "", playedAt: defaultPlayedAt });
+      setActiveTab("results");
+      return;
+    }
+
+    const selectedMembers = members.filter((member) => selectedMemberIds.includes(member.id));
+    if (selectedMembers.length === 0) {
+      setLoading(false);
+      setStatusMessage("メンバーを選択してください。");
+      return;
+    }
 
     for (const member of selectedMembers) {
       const scoreText = scoreDrafts[member.id] ?? "";
@@ -959,12 +1090,12 @@ export default function Home() {
         .from("rounds")
         .select("*")
         .eq("member_id", member.id)
-        .eq("played_at", newRound.playedAt)
-        .eq("course_name", newRound.courseName.trim());
+        .eq("played_at", playedAt)
+        .eq("course_name", courseName);
 
       if (existingError) {
         setLoading(false);
-        setStatusMessage("スコア保存中にエラーが発生しました。再度お試しください。" );
+        setStatusMessage("スコア保存中にエラーが発生しました。再度お試しください。");
         console.error(existingError);
         return;
       }
@@ -982,8 +1113,8 @@ export default function Home() {
         const { error: insertError } = await client.from("rounds").insert([
           {
             member_id: member.id,
-            played_at: newRound.playedAt,
-            course_name: newRound.courseName.trim(),
+            played_at: playedAt,
+            course_name: courseName,
             score: scoreValue,
           },
         ]);
@@ -997,45 +1128,6 @@ export default function Home() {
     }
 
     setLoading(false);
-    if (isCompetitionMode) {
-      const teamScores = {
-        A: activeCompetitionTeams.A.reduce((sum, member) => sum + Number(competitionScoreDrafts[member.id] ?? 0), 0),
-        B: activeCompetitionTeams.B.reduce((sum, member) => sum + Number(competitionScoreDrafts[member.id] ?? 0), 0),
-      };
-      const winner = teamScores.A === teamScores.B ? "draw" : teamScores.A < teamScores.B ? "B" : "A";
-      const nextRecord: CompetitionRecord = {
-        id: `${Date.now()}`,
-        date: newRound.playedAt,
-        courseName: newRound.courseName.trim() || "未指定",
-        teams: {
-          A: activeCompetitionTeams.A.map((member) => ({
-            memberId: member.id,
-            memberName: member.name,
-            score: Number(competitionScoreDrafts[member.id] ?? 0),
-            rating: stats.find((stat) => stat.member.id === member.id)?.rating ?? 0,
-          })),
-          B: activeCompetitionTeams.B.map((member) => ({
-            memberId: member.id,
-            memberName: member.name,
-            score: Number(competitionScoreDrafts[member.id] ?? 0),
-            rating: stats.find((stat) => stat.member.id === member.id)?.rating ?? 0,
-          })),
-        },
-        teamScores,
-        winner,
-      };
-      const nextRecords = [nextRecord, ...competitionRecords];
-      setCompetitionRecords(nextRecords);
-      const { error: competitionError } = await client.from("settings").upsert([
-        { key: "competitions", value: JSON.stringify(nextRecords) },
-      ]);
-      if (competitionError) {
-        setStatusMessage("コンペ記録の保存に失敗しました。")
-        console.error(competitionError);
-        return;
-      }
-    }
-
     setStatusMessage("スコアを保存しました。");
     await refreshRounds();
     setScoreDrafts({});
@@ -1151,18 +1243,31 @@ export default function Home() {
                   <div className="flex shrink-0 items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setIsCompetitionMode((current) => !current)}
+                      onClick={() => {
+                        setIsCompetitionMode((current) => {
+                          const next = !current;
+                          if (next) {
+                            setSelectedMemberIds(members.map((member) => member.id));
+                            setIsCompetitionStarted(false);
+                            setCompetitionScoreDrafts({});
+                            setCompetitionDraftTeams({ A: [], B: [] });
+                          }
+                          return next;
+                        });
+                      }}
                       className={`h-11 whitespace-nowrap rounded-full border px-3 text-[13px] font-semibold ${isCompetitionMode ? "border-[#16a34a] bg-[#f0fdf4] text-[#166534]" : "border-[#d1d5db] bg-white text-[#111111]"}`}
                     >
                       南高コンペ {isCompetitionMode ? "ON" : "OFF"}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setIsEditMembersMode((current) => !current)}
-                      className="h-11 whitespace-nowrap rounded-full border border-[#d1d5db] px-4 text-sm font-semibold text-[#111111]"
-                    >
-                      {isEditMembersMode ? "完了" : "編集"}
-                    </button>
+                    {!isCompetitionMode ? (
+                      <button
+                        type="button"
+                        onClick={() => setIsEditMembersMode((current) => !current)}
+                        className="h-11 whitespace-nowrap rounded-full border border-[#d1d5db] px-4 text-sm font-semibold text-[#111111]"
+                      >
+                        {isEditMembersMode ? "完了" : "編集"}
+                      </button>
+                    ) : null}
                   </div>
                 </div>
 
@@ -1252,7 +1357,7 @@ export default function Home() {
                                     inputMode="numeric"
                                     value={competitionScoreDrafts[member.id] ?? ""}
                                     onChange={(event) => setCompetitionScoreDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
-                                    className="h-[42px] w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                    className="h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
                                   />
                                 </label>
                               ))}
@@ -1269,7 +1374,7 @@ export default function Home() {
                                     inputMode="numeric"
                                     value={competitionScoreDrafts[member.id] ?? ""}
                                     onChange={(event) => setCompetitionScoreDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
-                                    className="h-[42px] w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                    className="h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
                                   />
                                 </label>
                               ))}
@@ -1280,6 +1385,7 @@ export default function Home() {
                     </div>
                   ) : null}
 
+                  {!isCompetitionMode ? (
                   <div className="rounded-[24px] border border-[#e5e7eb] bg-[#fafafa] p-3">
                     <div className="mb-3 flex items-center justify-between gap-2">
                       <div className="min-w-0">
@@ -1381,8 +1487,9 @@ export default function Home() {
                       </div>
                     )}
                   </div>
+                  ) : null}
 
-                  {selectedMembers.length > 0 ? (
+                  {!isCompetitionMode ? selectedMembers.length > 0 ? (
                     <div className="space-y-3">
                       {selectedMembers.map((member) => (
                         <label key={member.id} className="block rounded-[20px] border border-[#e5e7eb] bg-[#f9fafb] p-3">
@@ -1403,7 +1510,7 @@ export default function Home() {
                     <div className="rounded-[20px] border border-dashed border-[#d1d5db] p-4 text-sm text-[#6b7280]">
                       まずはメンバーを選択してください。
                     </div>
-                  )}
+                  ) : null}
 
                   <button type="submit" className="h-[48px] w-full rounded-[18px] bg-[#111111] text-sm font-semibold text-white">
                     保存する
