@@ -84,6 +84,12 @@ type TeamSplit = {
   difference: number;
 };
 
+type RoundGroupEditDraft = {
+  playedAt: string;
+  courseName: string;
+  scores: Record<string, string>;
+};
+
 const defaultPlayedAt = new Date().toISOString().slice(0, 10);
 
 function normalizeMembers(value: unknown): Member[] {
@@ -412,6 +418,22 @@ function generateBalancedTeams(stats: MemberStats[]) {
   return best;
 }
 
+function getRoundGroupId(date: string, course: string) {
+  return `${date}::${course}`;
+}
+
+function buildRoundGroupDraft(group: RoundGroup): RoundGroupEditDraft {
+  const scores = group.entries.reduce<Record<string, string>>((acc, entry) => {
+    acc[entry.memberId] = String(entry.score);
+    return acc;
+  }, {});
+  return {
+    playedAt: group.date,
+    courseName: group.course,
+    scores,
+  };
+}
+
 export default function Home() {
   const [members, setMembers] = useState<Member[]>([]);
   const [rounds, setRounds] = useState<Round[]>([]);
@@ -441,6 +463,8 @@ export default function Home() {
   const [competitionDraftTeams, setCompetitionDraftTeams] = useState<{ A: Member[]; B: Member[] }>({ A: [], B: [] });
   const [competitionScoreDrafts, setCompetitionScoreDrafts] = useState<Record<string, string>>({});
   const [expandedCompetitionYear, setExpandedCompetitionYear] = useState<string | null>(null);
+  const [isRoundHistoryEditMode, setIsRoundHistoryEditMode] = useState(false);
+  const [roundGroupDrafts, setRoundGroupDrafts] = useState<Record<string, RoundGroupEditDraft>>({});
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -626,6 +650,117 @@ export default function Home() {
       return acc;
     }, {});
   }, [safeCompetitionRecords]);
+
+  async function refreshRounds() {
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
+      return false;
+    }
+    const { data, error } = await client.from("rounds").select("*").order("played_at", { ascending: false });
+    if (error) {
+      setStatusMessage(`エラー: ${error.message}`);
+      return false;
+    }
+    setRounds((data ?? []) as Round[]);
+    return true;
+  }
+
+  function handleStartRoundHistoryEdit() {
+    const nextDrafts = roundGroups.reduce<Record<string, RoundGroupEditDraft>>((acc, group) => {
+      acc[getRoundGroupId(group.date, group.course)] = buildRoundGroupDraft(group);
+      return acc;
+    }, {});
+    setRoundGroupDrafts(nextDrafts);
+    setIsRoundHistoryEditMode(true);
+  }
+
+  function handleCancelRoundGroupDraft(group: RoundGroup) {
+    const groupId = getRoundGroupId(group.date, group.course);
+    setRoundGroupDrafts((current) => ({
+      ...current,
+      [groupId]: buildRoundGroupDraft(group),
+    }));
+  }
+
+  async function handleSaveRoundGroup(group: RoundGroup) {
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
+      return;
+    }
+
+    const groupId = getRoundGroupId(group.date, group.course);
+    const draft = roundGroupDrafts[groupId] ?? buildRoundGroupDraft(group);
+    const playedAt = draft.playedAt.trim();
+    const courseName = draft.courseName.trim();
+
+    if (!playedAt || !courseName) {
+      setStatusMessage("日付とゴルフ場を入力してください。");
+      return;
+    }
+
+    for (const entry of group.entries) {
+      const scoreText = draft.scores[entry.memberId] ?? "";
+      const score = Number(scoreText);
+      if (!scoreText.trim() || !Number.isFinite(score) || score <= 0) {
+        setStatusMessage("各メンバーのスコアを正しく入力してください。");
+        return;
+      }
+
+      const { error } = await client
+        .from("rounds")
+        .update({
+          played_at: playedAt,
+          course_name: courseName,
+          score,
+        })
+        .eq("member_id", entry.memberId)
+        .eq("played_at", group.date)
+        .eq("course_name", group.course);
+
+      if (error) {
+        console.error("round update/delete error:", error);
+        setStatusMessage(`エラー: ${error.message}`);
+        return;
+      }
+    }
+
+    const refreshed = await refreshRounds();
+    if (!refreshed) return;
+    setIsRoundHistoryEditMode(false);
+    setRoundGroupDrafts({});
+    setStatusMessage("ラウンド履歴を更新しました。");
+  }
+
+  async function handleDeleteRoundGroup(group: RoundGroup) {
+    if (!window.confirm("このラウンド履歴を削除しますか？")) {
+      return;
+    }
+
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、削除できません。");
+      return;
+    }
+
+    const { error } = await client
+      .from("rounds")
+      .delete()
+      .eq("played_at", group.date)
+      .eq("course_name", group.course);
+
+    if (error) {
+      console.error("round update/delete error:", error);
+      setStatusMessage(`エラー: ${error.message}`);
+      return;
+    }
+
+    const refreshed = await refreshRounds();
+    if (!refreshed) return;
+    setExpandedHistoryId(null);
+    setStatusMessage("ラウンド履歴を削除しました。");
+  }
 
   function handleCompetitionRecalculate() {
     const split = competitionSplitPreview;
@@ -902,8 +1037,7 @@ export default function Home() {
     }
 
     setStatusMessage("スコアを保存しました。");
-    const { data: storedRounds } = await client.from("rounds").select("*").order("played_at", { ascending: false });
-    setRounds((storedRounds ?? []) as Round[]);
+    await refreshRounds();
     setScoreDrafts({});
     setCompetitionScoreDrafts({});
     setNewRound({ courseName: "", playedAt: defaultPlayedAt });
@@ -1278,56 +1412,6 @@ export default function Home() {
                 </div>
               </section>
 
-              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-[18px] font-semibold text-[#111111]">ラウンド履歴</h2>
-                    <p className="mt-1 text-sm text-[#6b7280]">日付とゴルフ場単位でまとめて表示します。</p>
-                  </div>
-                  <span className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">{roundGroups.length}</span>
-                </div>
-
-                {roundGroups.length === 0 ? (
-                  <div className="rounded-[20px] border border-dashed border-[#d1d5db] p-5 text-sm text-[#6b7280]">
-                    まだデータがありません。
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {roundGroups.map((group) => {
-                      const isOpen = expandedHistoryId === `${group.date}-${group.course}`;
-                      return (
-                        <div key={`${group.date}-${group.course}`} className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
-                          <button type="button" onClick={() => setExpandedHistoryId(isOpen ? null : `${group.date}-${group.course}`)} className="flex w-full items-center justify-between gap-3 text-left">
-                            <div>
-                              <p className="text-sm font-semibold text-[#111111]">{formatDate(group.date)}</p>
-                              <p className="mt-1 text-sm text-[#6b7280]">{group.course}</p>
-                            </div>
-                            <div className="min-w-[132px] text-right">
-                              <p className="text-[13px] font-semibold leading-5 text-[#b91c1c]">🏆 ベストスコア</p>
-                              <p className="mt-1 text-sm font-semibold text-[#111111]">{group.minScore}</p>
-                              <p className="mt-1 text-[12px] text-[#6b7280]">{group.minMemberName || "-"}</p>
-                            </div>
-                          </button>
-
-                          {isOpen ? (
-                            <div className="mt-3 space-y-2">
-                              {group.entries
-                                .slice()
-                                .sort((a, b) => a.score - b.score)
-                                .map((entry) => (
-                                  <div key={`${group.date}-${group.course}-${entry.memberId}`} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2">
-                                    <span className="text-sm text-[#111111]">{entry.memberName || entry.memberId}</span>
-                                    <span className="text-sm font-semibold text-[#111111]">{entry.score}</span>
-                                  </div>
-                                ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
             </div>
           ) : activeTab === "tier" ? (
             <div className="space-y-4">
@@ -1464,6 +1548,141 @@ export default function Home() {
                       まだラウンド履歴または大会結果がありません
                     </div>
                   ) : null}
+
+                  <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-[#111111]">通常ラウンド履歴</p>
+                        <p className="mt-1 text-sm text-[#6b7280]">日付とゴルフ場単位でまとめて表示します。</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">{roundGroups.length}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isRoundHistoryEditMode) {
+                              setIsRoundHistoryEditMode(false);
+                              setRoundGroupDrafts({});
+                            } else {
+                              handleStartRoundHistoryEdit();
+                            }
+                          }}
+                          className="h-11 min-w-[56px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111]"
+                        >
+                          編集
+                        </button>
+                      </div>
+                    </div>
+
+                    {roundGroups.length === 0 ? (
+                      <p className="text-sm text-[#6b7280]">まだデータがありません。</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {roundGroups.map((group) => {
+                          const groupId = getRoundGroupId(group.date, group.course);
+                          const draft = roundGroupDrafts[groupId] ?? buildRoundGroupDraft(group);
+                          const isOpen = expandedHistoryId === groupId;
+
+                          return (
+                            <div key={groupId} className="rounded-[20px] border border-[#e5e7eb] bg-white p-3">
+                              {!isRoundHistoryEditMode ? (
+                                <button type="button" onClick={() => setExpandedHistoryId(isOpen ? null : groupId)} className="flex w-full items-center justify-between gap-3 text-left">
+                                  <div>
+                                    <p className="text-sm font-semibold text-[#111111]">{formatDate(group.date)}</p>
+                                    <p className="mt-1 text-sm text-[#6b7280]">{group.course}</p>
+                                  </div>
+                                  <div className="min-w-[132px] text-right">
+                                    <p className="text-[13px] font-semibold leading-5 text-[#b91c1c]">🏆 ベストスコア</p>
+                                    <p className="mt-1 text-sm font-semibold text-[#111111]">{group.minScore}</p>
+                                    <p className="mt-1 text-[12px] text-[#6b7280]">{group.minMemberName || "-"}</p>
+                                  </div>
+                                </button>
+                              ) : (
+                                <div className="space-y-3">
+                                  <label className="block text-sm font-medium text-[#111111]">
+                                    ゴルフ場
+                                    <input
+                                      value={draft.courseName}
+                                      onChange={(event) => {
+                                        const value = event.target.value;
+                                        setRoundGroupDrafts((current) => ({
+                                          ...current,
+                                          [groupId]: { ...draft, courseName: value },
+                                        }));
+                                      }}
+                                      className="mt-1 h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                    />
+                                  </label>
+                                  <label className="block text-sm font-medium text-[#111111]">
+                                    日付
+                                    <input
+                                      type="date"
+                                      value={draft.playedAt}
+                                      onChange={(event) => {
+                                        const value = event.target.value;
+                                        setRoundGroupDrafts((current) => ({
+                                          ...current,
+                                          [groupId]: { ...draft, playedAt: value },
+                                        }));
+                                      }}
+                                      className="mt-1 h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                    />
+                                  </label>
+
+                                  <div className="space-y-2">
+                                    {group.entries.map((entry) => (
+                                      <label key={`${groupId}-${entry.memberId}`} className="block text-sm text-[#111111]">
+                                        <span className="mb-1 block">{entry.memberName || entry.memberId}</span>
+                                        <input
+                                          type="text"
+                                          inputMode="numeric"
+                                          value={draft.scores[entry.memberId] ?? ""}
+                                          onChange={(event) => {
+                                            const value = event.target.value;
+                                            setRoundGroupDrafts((current) => ({
+                                              ...current,
+                                              [groupId]: {
+                                                ...draft,
+                                                scores: {
+                                                  ...draft.scores,
+                                                  [entry.memberId]: value,
+                                                },
+                                              },
+                                            }));
+                                          }}
+                                          className="h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                        />
+                                      </label>
+                                    ))}
+                                  </div>
+
+                                  <div className="flex flex-wrap gap-2">
+                                    <button type="button" onClick={() => handleSaveRoundGroup(group)} className="h-11 rounded-[12px] bg-[#111111] px-4 text-sm font-semibold text-white">保存</button>
+                                    <button type="button" onClick={() => handleCancelRoundGroupDraft(group)} className="h-11 rounded-[12px] border border-[#d1d5db] bg-white px-4 text-sm font-semibold text-[#111111]">キャンセル</button>
+                                    <button type="button" onClick={() => handleDeleteRoundGroup(group)} className="h-11 rounded-[12px] bg-[#b91c1c] px-4 text-sm font-semibold text-white">ラウンド削除</button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {!isRoundHistoryEditMode && isOpen ? (
+                                <div className="mt-3 space-y-2">
+                                  {group.entries
+                                    .slice()
+                                    .sort((a, b) => a.score - b.score)
+                                    .map((entry) => (
+                                      <div key={`${groupId}-${entry.memberId}`} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] px-3 py-2">
+                                        <span className="text-sm text-[#111111]">{entry.memberName || entry.memberId}</span>
+                                        <span className="text-sm font-semibold text-[#111111]">{entry.score}</span>
+                                      </div>
+                                    ))}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
 
                   <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
                     <p className="text-sm font-semibold text-[#111111]">大会結果</p>
