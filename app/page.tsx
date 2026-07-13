@@ -90,6 +90,20 @@ type RoundGroupEditDraft = {
   scores: Record<string, string>;
 };
 
+type CompetitionEditMemberDraft = {
+  memberId: string;
+  memberName: string;
+  rating: number;
+  score: string;
+  team: "A" | "B";
+};
+
+type CompetitionEditDraft = {
+  date: string;
+  courseName: string;
+  members: CompetitionEditMemberDraft[];
+};
+
 const defaultPlayedAt = new Date().toISOString().slice(0, 10);
 
 function normalizeMembers(value: unknown): Member[] {
@@ -434,6 +448,75 @@ function buildRoundGroupDraft(group: RoundGroup): RoundGroupEditDraft {
   };
 }
 
+function getCompetitionTeamEntries(record: CompetitionRecord, team: "A" | "B") {
+  const teamA = Array.isArray(record?.teams?.A) ? record.teams.A : [];
+  const teamB = Array.isArray(record?.teams?.B) ? record.teams.B : [];
+  return team === "A" ? teamA : teamB;
+}
+
+function buildCompetitionEditDraft(record: CompetitionRecord): CompetitionEditDraft {
+  const teamA = getCompetitionTeamEntries(record, "A");
+  const teamB = getCompetitionTeamEntries(record, "B");
+  return {
+    date: record.date,
+    courseName: record.courseName,
+    members: [
+      ...teamA.map((entry) => ({
+        memberId: entry.memberId,
+        memberName: entry.memberName || "名前未登録",
+        rating: Number.isFinite(entry.rating) ? entry.rating : 0,
+        score: String(entry.score ?? ""),
+        team: "A" as const,
+      })),
+      ...teamB.map((entry) => ({
+        memberId: entry.memberId,
+        memberName: entry.memberName || "名前未登録",
+        rating: Number.isFinite(entry.rating) ? entry.rating : 0,
+        score: String(entry.score ?? ""),
+        team: "B" as const,
+      })),
+    ],
+  };
+}
+
+function getCompetitionDerived(record: CompetitionRecord) {
+  const teamA = getCompetitionTeamEntries(record, "A");
+  const teamB = getCompetitionTeamEntries(record, "B");
+  const scoreA = teamA.reduce((sum, entry) => sum + (Number.isFinite(entry.score) ? entry.score : 0), 0);
+  const scoreB = teamB.reduce((sum, entry) => sum + (Number.isFinite(entry.score) ? entry.score : 0), 0);
+  const winner: "A" | "B" | "draw" = scoreA === scoreB ? "draw" : scoreA < scoreB ? "A" : "B";
+
+  const allEntries = [...teamA, ...teamB].map((entry) => ({
+    ...entry,
+    score: Number.isFinite(entry.score) ? entry.score : 0,
+  }));
+  const sorted = allEntries.slice().sort((a, b) => a.score - b.score);
+
+  const rankByMemberId: Record<string, number> = {};
+  let currentRank = 0;
+  let previousScore: number | null = null;
+  sorted.forEach((entry, index) => {
+    if (previousScore === null || entry.score !== previousScore) {
+      currentRank = index + 1;
+      previousScore = entry.score;
+    }
+    rankByMemberId[entry.memberId] = currentRank;
+  });
+
+  const bestEntry = sorted[0] ?? null;
+  return {
+    teamA,
+    teamB,
+    scoreA,
+    scoreB,
+    winner,
+    sorted,
+    rankByMemberId,
+    bestScore: bestEntry?.score ?? null,
+    winnerName: bestEntry?.memberName ?? "-",
+  };
+}
+
 export default function Home() {
   const [members, setMembers] = useState<Member[]>([]);
   const [rounds, setRounds] = useState<Round[]>([]);
@@ -462,7 +545,9 @@ export default function Home() {
   const [isCompetitionStarted, setIsCompetitionStarted] = useState(false);
   const [competitionDraftTeams, setCompetitionDraftTeams] = useState<{ A: Member[]; B: Member[] }>({ A: [], B: [] });
   const [competitionScoreDrafts, setCompetitionScoreDrafts] = useState<Record<string, string>>({});
-  const [expandedCompetitionYear, setExpandedCompetitionYear] = useState<string | null>(null);
+  const [expandedCompetitionId, setExpandedCompetitionId] = useState<string | null>(null);
+  const [editCompetitionId, setEditCompetitionId] = useState<string | null>(null);
+  const [competitionEditDrafts, setCompetitionEditDrafts] = useState<Record<string, CompetitionEditDraft>>({});
   const [isRoundHistoryEditMode, setIsRoundHistoryEditMode] = useState(false);
   const [roundGroupDrafts, setRoundGroupDrafts] = useState<Record<string, RoundGroupEditDraft>>({});
 
@@ -635,21 +720,10 @@ export default function Home() {
       B: activeCompetitionTeams.B.reduce((sum, member) => sum + getRating(member), 0),
     };
   }, [activeCompetitionTeams, stats]);
-  const groupedCompetitionRecords = useMemo(() => {
-    return safeCompetitionRecords.reduce<Record<string, CompetitionRecord[]>>((acc, record) => {
-      const dateValue = typeof record.date === "string" ? record.date.trim() : "";
-      let year = "日付不明";
-      if (dateValue) {
-        const parsedDate = new Date(dateValue);
-        if (!Number.isNaN(parsedDate.getTime())) {
-          year = parsedDate.getFullYear().toString();
-        }
-      }
-      if (!acc[year]) acc[year] = [];
-      acc[year].push(record);
-      return acc;
-    }, {});
-  }, [safeCompetitionRecords]);
+  const sortedCompetitionRecords = useMemo(
+    () => safeCompetitionRecords.slice().sort((a, b) => b.date.localeCompare(a.date)),
+    [safeCompetitionRecords]
+  );
 
   async function refreshRounds() {
     const client: any = getSupabaseClient();
@@ -664,6 +738,123 @@ export default function Home() {
     }
     setRounds((data ?? []) as Round[]);
     return true;
+  }
+
+  async function refreshCompetitionRecords() {
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
+      return false;
+    }
+
+    const { data, error } = await client.from("settings").select("*").eq("key", "competitions").maybeSingle();
+    if (error) {
+      setStatusMessage(`エラー: ${error.message}`);
+      return false;
+    }
+
+    const value = (data as { value?: unknown } | null)?.value;
+    setCompetitionRecords(normalizeCompetitions(value));
+    return true;
+  }
+
+  function handleStartCompetitionEdit(record: CompetitionRecord) {
+    setCompetitionEditDrafts((current) => ({
+      ...current,
+      [record.id]: buildCompetitionEditDraft(record),
+    }));
+    setEditCompetitionId(record.id);
+  }
+
+  function handleCancelCompetitionEdit(record: CompetitionRecord) {
+    setCompetitionEditDrafts((current) => ({
+      ...current,
+      [record.id]: buildCompetitionEditDraft(record),
+    }));
+    setEditCompetitionId(null);
+  }
+
+  async function handleSaveCompetitionEdit(record: CompetitionRecord) {
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、保存できません。");
+      return;
+    }
+
+    const draft = competitionEditDrafts[record.id] ?? buildCompetitionEditDraft(record);
+    const date = draft.date.trim();
+    const courseName = draft.courseName.trim();
+    if (!date || !courseName) {
+      setStatusMessage("日付とゴルフ場を入力してください。");
+      return;
+    }
+
+    const members = draft.members.map((item) => ({ ...item, score: item.score.trim() }));
+    for (const member of members) {
+      if (!member.score || !Number.isFinite(Number(member.score)) || Number(member.score) <= 0) {
+        setStatusMessage("各メンバーのスコアを正しく入力してください。");
+        return;
+      }
+    }
+
+    const teamA = members
+      .filter((item) => item.team === "A")
+      .map((item) => ({ memberId: item.memberId, memberName: item.memberName, rating: item.rating, score: Number(item.score) }));
+    const teamB = members
+      .filter((item) => item.team === "B")
+      .map((item) => ({ memberId: item.memberId, memberName: item.memberName, rating: item.rating, score: Number(item.score) }));
+
+    const teamScores = {
+      A: teamA.reduce((sum, item) => sum + item.score, 0),
+      B: teamB.reduce((sum, item) => sum + item.score, 0),
+    };
+    const winner: "A" | "B" | "draw" = teamScores.A === teamScores.B ? "draw" : teamScores.A < teamScores.B ? "A" : "B";
+
+    const nextRecord: CompetitionRecord = {
+      ...record,
+      date,
+      courseName,
+      teams: { A: teamA, B: teamB },
+      teamScores,
+      winner,
+    };
+
+    const nextRecords = safeCompetitionRecords.map((item) => (item.id === record.id ? nextRecord : item));
+    const { error } = await client.from("settings").upsert([{ key: "competitions", value: JSON.stringify(nextRecords) }]);
+    if (error) {
+      setStatusMessage(`エラー: ${error.message}`);
+      return;
+    }
+
+    const refreshed = await refreshCompetitionRecords();
+    if (!refreshed) return;
+    setEditCompetitionId(null);
+    setStatusMessage("大会結果を更新しました。");
+  }
+
+  async function handleDeleteCompetitionRecord(recordId: string) {
+    if (!window.confirm("この大会結果を削除しますか？")) {
+      return;
+    }
+
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、削除できません。");
+      return;
+    }
+
+    const nextRecords = safeCompetitionRecords.filter((item) => item.id !== recordId);
+    const { error } = await client.from("settings").upsert([{ key: "competitions", value: JSON.stringify(nextRecords) }]);
+    if (error) {
+      setStatusMessage(`エラー: ${error.message}`);
+      return;
+    }
+
+    const refreshed = await refreshCompetitionRecords();
+    if (!refreshed) return;
+    setExpandedCompetitionId((current) => (current === recordId ? null : current));
+    setEditCompetitionId((current) => (current === recordId ? null : current));
+    setStatusMessage("大会結果を削除しました。");
   }
 
   function handleStartRoundHistoryEdit() {
@@ -1797,50 +1988,209 @@ export default function Home() {
                       <p className="mt-2 text-sm text-[#6b7280]">まだ大会結果がありません。</p>
                     ) : (
                       <div className="mt-3 space-y-3">
-                        {Object.entries(groupedCompetitionRecords)
-                          .sort(([a], [b]) => Number(b) - Number(a))
-                          .map(([year, records]) => {
-                            const isOpen = expandedCompetitionYear === year;
-                            return (
-                              <div key={year} className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
-                                <button type="button" onClick={() => setExpandedCompetitionYear(isOpen ? null : year)} className="flex w-full items-center justify-between gap-3 text-left">
-                                  <span className="text-sm font-semibold text-[#111111]">{year}年</span>
-                                  <span className="rounded-full bg-[#111111] px-3 py-1 text-[12px] font-semibold text-white">{records.length}件</span>
+                        {sortedCompetitionRecords.map((record) => {
+                          const derived = getCompetitionDerived(record);
+                          const isOpen = expandedCompetitionId === record.id;
+                          const isEditing = editCompetitionId === record.id;
+                          const draft = competitionEditDrafts[record.id] ?? buildCompetitionEditDraft(record);
+
+                          const getRankLabel = (rank: number) => {
+                            if (rank === 1) return { text: "優勝", cls: "text-[#b45309]" };
+                            if (rank === 2) return { text: "準優勝", cls: "text-[#6b7280]" };
+                            if (rank === 3) return { text: "3位", cls: "text-[#92400e]" };
+                            return { text: `${rank}位`, cls: "text-[#111111]" };
+                          };
+
+                          return (
+                            <div key={record.id} className="rounded-[20px] border border-[#e5e7eb] bg-white p-3">
+                              <div className="flex items-start justify-between gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedCompetitionId(isOpen ? null : record.id)}
+                                  className="flex-1 text-left"
+                                >
+                                  <p className="text-sm font-semibold text-[#111111]">{formatDate(record.date)}</p>
+                                  <p className="mt-1 text-sm text-[#6b7280]">{record.courseName}</p>
+                                  <p className="mt-1 text-[13px] font-semibold text-[#b91c1c]">🏆 優勝者: {derived.winnerName}</p>
+                                  <p className="mt-1 text-[13px] text-[#111111]">ベストスコア: {derived.bestScore ?? "-"}</p>
                                 </button>
-                                {isOpen ? (
-                                  <div className="mt-3 space-y-2">
-                                    {records.slice().sort((a, b) => b.date.localeCompare(a.date)).map((record) => {
-                                      const rankLabel = record.winner === "A" ? "優勝" : record.winner === "B" ? "準優勝" : "引き分け";
-                                      const rankBadgeClass = record.winner === "A" ? "bg-[#fef3c7] text-[#92400e]" : record.winner === "B" ? "bg-[#e5e7eb] text-[#374151]" : "bg-[#f3f4f6] text-[#111111]";
-                                      return (
-                                        <div key={record.id} className="rounded-[14px] border border-[#e5e7eb] bg-[#fafafa] p-3">
-                                          <div className="flex items-center justify-between gap-2">
-                                            <div>
-                                              <p className="text-sm font-semibold text-[#111111]">{record.courseName}</p>
-                                              <p className="mt-1 text-[12px] text-[#6b7280]">{record.date}</p>
-                                            </div>
-                                            <span className={`rounded-full px-2 py-1 text-[12px] font-semibold ${rankBadgeClass}`}>{rankLabel}</span>
+                                <div className="flex flex-col items-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => (isEditing ? handleCancelCompetitionEdit(record) : handleStartCompetitionEdit(record))}
+                                    className="h-11 min-w-[56px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#111111]"
+                                  >
+                                    {isEditing ? "キャンセル" : "編集"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setExpandedCompetitionId(isOpen ? null : record.id)}
+                                    className="rounded-full bg-[#111111] whitespace-nowrap min-w-[56px] h-11 px-4 text-[13px] flex items-center justify-center flex-shrink-0 font-semibold text-white"
+                                  >
+                                    {isOpen ? "閉じる" : "開く"}
+                                  </button>
+                                </div>
+                              </div>
+
+                              {isOpen ? (
+                                <div className="mt-3 space-y-3">
+                                  {isEditing ? (
+                                    <div className="space-y-3 rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                                      <label className="block text-sm font-medium text-[#111111]">
+                                        ゴルフ場
+                                        <input
+                                          value={draft.courseName}
+                                          onChange={(event) => {
+                                            const value = event.target.value;
+                                            setCompetitionEditDrafts((current) => ({
+                                              ...current,
+                                              [record.id]: { ...draft, courseName: value },
+                                            }));
+                                          }}
+                                          className="mt-1 h-11 w-full rounded-[12px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111]"
+                                        />
+                                      </label>
+                                      <label className="block text-sm font-medium text-[#111111]">
+                                        日付
+                                        <input
+                                          type="date"
+                                          value={draft.date}
+                                          onChange={(event) => {
+                                            const value = event.target.value;
+                                            setCompetitionEditDrafts((current) => ({
+                                              ...current,
+                                              [record.id]: { ...draft, date: value },
+                                            }));
+                                          }}
+                                          className="mt-1 h-11 w-full rounded-[12px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111]"
+                                        />
+                                      </label>
+
+                                      <div className="space-y-2">
+                                        {draft.members.map((member, index) => (
+                                          <div key={`${record.id}-${member.memberId}-${index}`} className="grid gap-2 rounded-[12px] border border-[#e5e7eb] bg-white p-2 sm:grid-cols-3">
+                                            <p className="text-sm font-semibold text-[#111111]">{member.memberName}</p>
+                                            <select
+                                              value={member.team}
+                                              onChange={(event) => {
+                                                const teamValue = event.target.value === "B" ? "B" : "A";
+                                                setCompetitionEditDrafts((current) => ({
+                                                  ...current,
+                                                  [record.id]: {
+                                                    ...draft,
+                                                    members: draft.members.map((item, itemIndex) =>
+                                                      itemIndex === index ? { ...item, team: teamValue } : item
+                                                    ),
+                                                  },
+                                                }));
+                                              }}
+                                              className="h-11 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                            >
+                                              <option value="A">Team A</option>
+                                              <option value="B">Team B</option>
+                                            </select>
+                                            <input
+                                              type="text"
+                                              inputMode="numeric"
+                                              value={member.score}
+                                              onChange={(event) => {
+                                                const value = event.target.value;
+                                                setCompetitionEditDrafts((current) => ({
+                                                  ...current,
+                                                  [record.id]: {
+                                                    ...draft,
+                                                    members: draft.members.map((item, itemIndex) =>
+                                                      itemIndex === index ? { ...item, score: value } : item
+                                                    ),
+                                                  },
+                                                }));
+                                              }}
+                                              className="h-11 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                              placeholder="スコア"
+                                            />
                                           </div>
-                                          <div className="mt-2 grid gap-2 text-sm text-[#111111] sm:grid-cols-2">
-                                            <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-2">
-                                              <p className="font-semibold">Team A</p>
-                                              <p className="mt-1">合計 {record.teamScores.A}</p>
-                                              {record.teams.A.map((entry) => <p key={entry.memberId} className="mt-1 text-[#6b7280]">{entry.memberName}: {entry.score}</p>)}
-                                            </div>
-                                            <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-2">
-                                              <p className="font-semibold">Team B</p>
-                                              <p className="mt-1">合計 {record.teamScores.B}</p>
-                                              {record.teams.B.map((entry) => <p key={entry.memberId} className="mt-1 text-[#6b7280]">{entry.memberName}: {entry.score}</p>)}
-                                            </div>
+                                        ))}
+                                      </div>
+
+                                      <div className="flex flex-wrap gap-2">
+                                        <button type="button" onClick={() => handleSaveCompetitionEdit(record)} className="h-11 rounded-[12px] bg-[#111111] px-4 text-sm font-semibold text-white">保存</button>
+                                        <button type="button" onClick={() => handleCancelCompetitionEdit(record)} className="h-11 rounded-[12px] border border-[#d1d5db] bg-white px-4 text-sm font-semibold text-[#111111]">キャンセル</button>
+                                        <button type="button" onClick={() => handleDeleteCompetitionRecord(record.id)} className="h-11 rounded-[12px] bg-[#b91c1c] px-4 text-sm font-semibold text-white">大会結果削除</button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <>
+                                      <div className="grid gap-2 sm:grid-cols-2">
+                                        <div className="rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                                          <div className="flex items-center justify-between gap-2">
+                                            <p className="text-sm font-semibold text-[#111111]">Team A</p>
+                                            <span className="text-[12px] font-semibold text-[#111111]">
+                                              {derived.winner === "A" ? "⭐ WINNER" : derived.winner === "draw" ? "DRAW" : "LOSE"}
+                                            </span>
+                                          </div>
+                                          <p className="mt-1 text-sm text-[#6b7280]">チーム合計: {derived.scoreA}</p>
+                                          <div className="mt-2 space-y-1">
+                                            {derived.teamA.map((entry) => {
+                                              const rank = derived.rankByMemberId[entry.memberId] ?? 0;
+                                              const rankLabel = getRankLabel(rank);
+                                              return (
+                                                <div key={`A-${record.id}-${entry.memberId}`} className="flex items-center justify-between rounded-[10px] bg-white px-2 py-2 text-sm">
+                                                  <span>{entry.memberName}</span>
+                                                  <span className="font-semibold">{entry.score}</span>
+                                                  <span className={`text-[12px] font-semibold ${rankLabel.cls}`}>{rankLabel.text}</span>
+                                                </div>
+                                              );
+                                            })}
                                           </div>
                                         </div>
-                                      );
-                                    })}
-                                  </div>
-                                ) : null}
-                              </div>
-                            );
-                          })}
+
+                                        <div className="rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                                          <div className="flex items-center justify-between gap-2">
+                                            <p className="text-sm font-semibold text-[#111111]">Team B</p>
+                                            <span className="text-[12px] font-semibold text-[#111111]">
+                                              {derived.winner === "B" ? "⭐ WINNER" : derived.winner === "draw" ? "DRAW" : "LOSE"}
+                                            </span>
+                                          </div>
+                                          <p className="mt-1 text-sm text-[#6b7280]">チーム合計: {derived.scoreB}</p>
+                                          <div className="mt-2 space-y-1">
+                                            {derived.teamB.map((entry) => {
+                                              const rank = derived.rankByMemberId[entry.memberId] ?? 0;
+                                              const rankLabel = getRankLabel(rank);
+                                              return (
+                                                <div key={`B-${record.id}-${entry.memberId}`} className="flex items-center justify-between rounded-[10px] bg-white px-2 py-2 text-sm">
+                                                  <span>{entry.memberName}</span>
+                                                  <span className="font-semibold">{entry.score}</span>
+                                                  <span className={`text-[12px] font-semibold ${rankLabel.cls}`}>{rankLabel.text}</span>
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      <div className="rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                                        <p className="text-sm font-semibold text-[#111111]">全体順位</p>
+                                        <div className="mt-2 space-y-1">
+                                          {derived.sorted.map((entry) => {
+                                            const rank = derived.rankByMemberId[entry.memberId] ?? 0;
+                                            const rankLabel = getRankLabel(rank);
+                                            return (
+                                              <div key={`rank-${record.id}-${entry.memberId}`} className="flex items-center justify-between rounded-[10px] bg-white px-2 py-2 text-sm">
+                                                <span>{entry.memberName}</span>
+                                                <span className="font-semibold">{entry.score}</span>
+                                                <span className={`text-[12px] font-semibold ${rankLabel.cls}`}>{rankLabel.text}</span>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
