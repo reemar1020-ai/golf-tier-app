@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { getSupabaseClient } from "@/lib/supabase";
 
 type Member = {
@@ -588,6 +588,12 @@ export default function Home() {
   const [isCompetitionSettingsDeleting, setIsCompetitionSettingsDeleting] = useState(false);
   const [editingRoundGroupId, setEditingRoundGroupId] = useState<string | null>(null);
   const [roundGroupDrafts, setRoundGroupDrafts] = useState<Record<string, RoundGroupEditDraft>>({});
+  const [showAllRoundHistories, setShowAllRoundHistories] = useState(false);
+  const [pendingScrollRoundGroupId, setPendingScrollRoundGroupId] = useState<string | null>(null);
+  const [savedToastVisible, setSavedToastVisible] = useState(false);
+  const [scrollReturnY, setScrollReturnY] = useState<number | null>(null);
+  const roundGroupRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const playerDetailRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -1475,6 +1481,9 @@ export default function Home() {
     setScoreDrafts({});
     setCompetitionScoreDrafts({});
     setNewRound({ courseName: "", playedAt: defaultPlayedAt });
+    setSavedToastVisible(true);
+    setPendingScrollRoundGroupId(getRoundGroupId(playedAt, courseName));
+    setActiveTab("results");
   }
 
   async function handleSaveChampionshipResult(memberId: string, result: ChampionshipResult) {
@@ -1552,6 +1561,57 @@ export default function Home() {
   const selectedMembers = useMemo(() => safeMembers.filter((member) => selectedMemberIds.includes(member.id)), [safeMembers, selectedMemberIds]);
   const selectedMemberDetails = useMemo(() => stats.filter((stat) => selectedMemberIds.includes(stat.member.id)), [stats, selectedMemberIds]);
   const activePlayerDetail = stats.find((stat) => stat.member.id === selectedRankingMemberId) ?? null;
+  const visibleRoundGroups = showAllRoundHistories ? roundGroups : roundGroups.slice(0, 3);
+
+  function handleSelectPlayerDetail(memberId: string) {
+    if (typeof window !== "undefined") {
+      setScrollReturnY(window.scrollY);
+    }
+    setSelectedRankingMemberId(memberId);
+  }
+
+  function handleClosePlayerDetail() {
+    setSelectedRankingMemberId(null);
+    if (typeof window !== "undefined" && scrollReturnY !== null) {
+      window.scrollTo({ top: scrollReturnY, behavior: "smooth" });
+    }
+    setScrollReturnY(null);
+  }
+
+  useEffect(() => {
+    if (!savedToastVisible) return;
+    const timer = window.setTimeout(() => {
+      setSavedToastVisible(false);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [savedToastVisible]);
+
+  useEffect(() => {
+    if (activeTab !== "results" || !pendingScrollRoundGroupId) return;
+    const exists = roundGroups.some((group) => getRoundGroupId(group.date, group.course) === pendingScrollRoundGroupId);
+    if (!exists) return;
+
+    const topThreeIds = roundGroups.slice(0, 3).map((group) => getRoundGroupId(group.date, group.course));
+    if (!topThreeIds.includes(pendingScrollRoundGroupId)) {
+      setShowAllRoundHistories(true);
+    }
+
+    setExpandedHistoryId(pendingScrollRoundGroupId);
+    const node = roundGroupRefs.current[pendingScrollRoundGroupId];
+    if (node) {
+      window.requestAnimationFrame(() => {
+        node.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      setPendingScrollRoundGroupId(null);
+    }
+  }, [activeTab, pendingScrollRoundGroupId, roundGroups, showAllRoundHistories]);
+
+  useEffect(() => {
+    if (!selectedRankingMemberId || !playerDetailRef.current) return;
+    window.requestAnimationFrame(() => {
+      playerDetailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [selectedRankingMemberId]);
 
   return (
     <div className="min-h-screen overflow-x-hidden bg-[#111111] text-[#111111]">
@@ -1567,6 +1627,11 @@ export default function Home() {
           {statusMessage ? (
             <div className="mb-4 rounded-[20px] border border-[#d6d3d1] bg-[#fff7ed] px-4 py-3 text-sm text-[#7c2d12] shadow-sm">
               {statusMessage}
+            </div>
+          ) : null}
+          {savedToastVisible ? (
+            <div className="toast-message fixed left-1/2 top-5 z-50 -translate-x-1/2 rounded-full bg-[#111111] px-4 py-2 text-sm font-semibold text-white shadow-lg">
+              保存しました
             </div>
           ) : null}
 
@@ -1884,22 +1949,33 @@ export default function Home() {
                 {expandedDetail === "tier" ? (
                   <div className="mt-4 space-y-3">
                     {(["S", "A", "B", "C"] as const).map((tier) => (
-                      <div key={tier} className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                      <div
+                        key={tier}
+                        className={`rounded-[20px] border p-3 ${
+                          tier === "S"
+                            ? "border-[#eab308] bg-[#fef9c3]"
+                            : tier === "A"
+                            ? "border-[#fca5a5] bg-[#fee2e2]"
+                            : tier === "B"
+                            ? "border-[#93c5fd] bg-[#dbeafe]"
+                            : "border-[#d1d5db] bg-[#f3f4f6]"
+                        }`}
+                      >
                         <div className="mb-2 flex items-center justify-between">
-                          <p className="text-sm font-semibold text-[#111111]">Tier {tier}</p>
-                          <span className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">{tierGroups[tier].length}</span>
+                          <p className="text-sm font-semibold text-[#111111]">{tier === "S" ? "👑 Tier S" : `Tier ${tier}`}</p>
+                          <span className="rounded-full bg-white/80 px-3 py-1 text-sm font-semibold text-[#111111]">{tierGroups[tier].length}</span>
                         </div>
                         <div className="space-y-2">
                           {tierGroups[tier].length === 0 ? (
                             <p className="text-sm text-[#6b7280]">まだデータがありません。</p>
                           ) : (
                             tierGroups[tier].map((stat) => (
-                              <button key={stat.member.id} type="button" onClick={() => setSelectedRankingMemberId(stat.member.id)} className="w-full rounded-[16px] border border-[#e5e7eb] bg-white p-3 text-left">
+                              <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="w-full rounded-[16px] border border-white/70 bg-white p-3 text-left shadow-sm">
                                 <div className="flex items-center justify-between gap-2">
                                   <p className="text-sm font-semibold text-[#111111]">{stat.member.name}</p>
                                   <p className="text-sm font-semibold text-[#111111]">{stat.rating}pt</p>
                                 </div>
-                                <p className="mt-1 text-xs text-[#6b7280]">平均 {stat.averageScore ?? "-"} / ベスト {stat.bestScore ?? "-"}</p>
+                                <p className="mt-1 text-xs text-[#4b5563]">Tier {stat.tier} / 平均 {stat.averageScore ?? "-"} / ベスト {stat.bestScore ?? "-"}</p>
                               </button>
                             ))
                           )}
@@ -1931,7 +2007,7 @@ export default function Home() {
                       <p className="text-sm font-semibold text-[#111111]">レート点数ランキング</p>
                       <div className="mt-3 space-y-2">
                         {rankingByRate.map((stat, index) => (
-                          <button key={stat.member.id} type="button" onClick={() => setSelectedRankingMemberId(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
+                          <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
                             <span className="text-sm font-semibold text-[#111111]">{index + 1}. {stat.member.name}</span>
                             <span className="text-sm font-semibold text-[#b91c1c]">{stat.rating}pt</span>
                           </button>
@@ -1943,7 +2019,7 @@ export default function Home() {
                       <p className="text-sm font-semibold text-[#111111]">ベストスコアランキング</p>
                       <div className="mt-3 space-y-2">
                         {rankingByBest.map((stat, index) => (
-                          <button key={stat.member.id} type="button" onClick={() => setSelectedRankingMemberId(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
+                          <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
                             <span className="text-sm font-semibold text-[#111111]">{index + 1}. {stat.member.name}</span>
                             <span className="text-sm font-semibold text-[#111111]">{stat.bestScore ?? "-"}</span>
                           </button>
@@ -1956,12 +2032,12 @@ export default function Home() {
               </section>
 
               {activePlayerDetail ? (
-                <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                <section ref={playerDetailRef} className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-semibold text-[#111111]">{activePlayerDetail.member.name}の詳細</p>
                     <button
                       type="button"
-                      onClick={() => setSelectedRankingMemberId(null)}
+                      onClick={handleClosePlayerDetail}
                       className="h-11 min-w-[56px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111]"
                     >
                       閉じる
@@ -2017,37 +2093,47 @@ export default function Home() {
                         <p className="text-sm font-semibold text-[#111111]">通常ラウンド履歴</p>
                         <p className="mt-1 text-sm text-[#6b7280]">日付とゴルフ場単位でまとめて表示します。</p>
                       </div>
-                      <span className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">{roundGroups.length}</span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowAllRoundHistories((current) => !current)}
+                          className="h-10 min-w-[56px] whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111]"
+                        >
+                          {showAllRoundHistories ? "閉じる" : "一覧"}
+                        </button>
+                        <span className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">{roundGroups.length}</span>
+                      </div>
                     </div>
+                    {showAllRoundHistories ? <p className="mb-3 text-xs font-semibold text-[#6b7280]">全ラウンド見出し表示</p> : null}
 
                     {roundGroups.length === 0 ? (
                       <p className="text-sm text-[#6b7280]">まだデータがありません。</p>
                     ) : (
                       <div className="space-y-3">
-                        {roundGroups.map((group) => {
+                        {visibleRoundGroups.map((group) => {
                           const groupId = getRoundGroupId(group.date, group.course);
                           const draft = roundGroupDrafts[groupId] ?? buildRoundGroupDraft(group);
                           const isOpen = expandedHistoryId === groupId;
                           const isEditing = editingRoundGroupId === groupId;
 
                           return (
-                            <div key={groupId} className="rounded-[20px] border border-[#e5e7eb] bg-white p-3">
+                            <div key={groupId} ref={(node) => { roundGroupRefs.current[groupId] = node; }} className="rounded-[18px] border border-[#e5e7eb] bg-white p-2.5">
                               {!isEditing ? (
                                 <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(56px,auto)] items-start gap-2">
-                                  <button type="button" onClick={() => setExpandedHistoryId(isOpen ? null : groupId)} className="col-span-2 grid gap-1 text-left sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                                  <button type="button" onClick={() => setExpandedHistoryId(isOpen ? null : groupId)} className="col-span-2 grid gap-1 text-left">
                                     <div className="min-w-0 text-left">
-                                      <p className="text-sm font-semibold text-[#111111]">{formatDate(group.date)}</p>
-                                      <p className="mt-1 text-sm text-[#6b7280]">{group.course}</p>
+                                      <p className="text-[13px] font-semibold leading-5 text-[#111111]">{formatDate(group.date)}</p>
+                                      <p className="mt-0.5 text-[12px] leading-5 text-[#6b7280] line-clamp-1">{group.course}</p>
                                     </div>
-                                    <div className="text-center sm:px-2">
-                                      <p className="text-[13px] font-semibold leading-5 text-[#b91c1c]">🏆 ベストスコア {group.minScore}</p>
-                                      <p className="mt-1 text-[12px] text-[#6b7280]">{group.minMemberName || "-"}</p>
+                                    <div className="text-left">
+                                      <p className="text-[12px] font-semibold leading-5 text-[#b91c1c]">🏆 優勝者</p>
+                                      <p className="text-[12px] leading-5 text-[#6b7280]">{group.minMemberName || "-"}（{group.minScore}）</p>
                                     </div>
                                   </button>
                                   <button
                                     type="button"
                                     onClick={() => handleStartRoundGroupEdit(group)}
-                                    className="h-11 min-w-[56px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111]"
+                                    className="h-10 min-w-[56px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111]"
                                   >
                                     編集
                                   </button>

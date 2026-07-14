@@ -54,3 +54,26 @@ textarea {
 button {
   -webkit-tap-highlight-color: transparent;
 }
+
+@keyframes toast-pop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -8px);
+  }
+  12% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  88% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+}
+
+.toast-message {
+  animation: toast-pop 2s ease forwards;
+}
