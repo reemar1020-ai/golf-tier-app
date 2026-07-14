@@ -1126,15 +1126,20 @@ export default function Home() {
     const member = safeMembers.find((item) => item.id === memberId);
     if (!member) return;
     setCompetitionDraftTeams((current) => {
+      const source = current.A.length > 0 || current.B.length > 0 ? current : activeCompetitionTeams;
+      const nextA = source.A.filter((item) => item.id !== member.id);
+      const nextB = source.B.filter((item) => item.id !== member.id);
+
       if (target === "A") {
         return {
-          A: [...current.A.filter((item) => item.id !== member.id), member],
-          B: current.B.filter((item) => item.id !== member.id),
+          A: [...nextA, member],
+          B: nextB,
         };
       }
+
       return {
-        A: current.A.filter((item) => item.id !== member.id),
-        B: [...current.B.filter((item) => item.id !== member.id), member],
+        A: nextA,
+        B: [...nextB, member],
       };
     });
   }
