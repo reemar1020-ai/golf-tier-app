@@ -46,6 +46,8 @@ type RoundGroup = {
 
 type TabKey = "score" | "tier" | "results";
 
+type RoundViewMode = "closed" | "details" | "edit";
+
 type ChampionshipResult = "win" | "runner-up" | "third" | "none";
 
 type CompetitionEntry = {
@@ -609,7 +611,6 @@ export default function Home() {
     courseName: "",
     playedAt: defaultPlayedAt,
   });
-  const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
   const [expandedDetail, setExpandedDetail] = useState<"tier" | "ranking" | "teams" | null>("tier");
   const [selectedRankingMemberId, setSelectedRankingMemberId] = useState<string | null>(null);
   const [teamVersion, setTeamVersion] = useState(0);
@@ -628,8 +629,8 @@ export default function Home() {
   const [competitionEditDrafts, setCompetitionEditDrafts] = useState<Record<string, CompetitionEditDraft>>({});
   const [isCompetitionSettingsSaving, setIsCompetitionSettingsSaving] = useState(false);
   const [isCompetitionSettingsDeleting, setIsCompetitionSettingsDeleting] = useState(false);
-  const [editingRoundGroupId, setEditingRoundGroupId] = useState<string | null>(null);
   const [roundGroupDrafts, setRoundGroupDrafts] = useState<Record<string, RoundGroupEditDraft>>({});
+  const [roundViewModes, setRoundViewModes] = useState<Record<string, RoundViewMode>>({});
   const [showAllRoundHistories, setShowAllRoundHistories] = useState(false);
   const [pendingScrollRoundGroupId, setPendingScrollRoundGroupId] = useState<string | null>(null);
   const [savedToastVisible, setSavedToastVisible] = useState(false);
@@ -791,65 +792,6 @@ export default function Home() {
     const selectedStats = stats.filter((stat) => selectedMemberIds.includes(stat.member.id));
     return generateBalancedTeams(selectedStats);
   }, [stats, selectedMemberIds, teamVersion]);
-  const activeCompetitionTeams = useMemo(() => {
-    if (competitionDraftTeams.A.length > 0 || competitionDraftTeams.B.length > 0) {
-      return competitionDraftTeams;
-    }
-    return {
-      A: competitionSplitPreview.teamA.map((stat) => stat.member),
-      B: competitionSplitPreview.teamB.map((stat) => stat.member),
-    };
-  }, [competitionDraftTeams, competitionSplitPreview]);
-  const competitionTeamRatings = useMemo(() => {
-    const getRating = (member: Member) => stats.find((stat) => stat.member.id === member.id)?.rating ?? 0;
-    return {
-      A: activeCompetitionTeams.A.reduce((sum, member) => sum + getRating(member), 0),
-      B: activeCompetitionTeams.B.reduce((sum, member) => sum + getRating(member), 0),
-    };
-  }, [activeCompetitionTeams, stats]);
-  const sortedCompetitionRecords = useMemo(
-    () => safeCompetitionRecords.slice().sort((a, b) => b.date.localeCompare(a.date)),
-    [safeCompetitionRecords]
-  );
-  const roundWinCounts = useMemo(() => {
-    const wins: Record<string, number> = {};
-    const grouped = new Map<string, Round[]>();
-    safeRounds.forEach((round) => {
-      const key = `${round.played_at}::${round.course_name}`;
-      const existing = grouped.get(key) ?? [];
-      existing.push(round);
-      grouped.set(key, existing);
-    });
-
-    grouped.forEach((groupRounds) => {
-      if (groupRounds.length === 0) return;
-      const minScore = Math.min(...groupRounds.map((item) => item.score));
-      groupRounds
-        .filter((item) => item.score === minScore)
-        .forEach((winnerRound) => {
-          wins[winnerRound.member_id] = (wins[winnerRound.member_id] ?? 0) + 1;
-        });
-    });
-    return wins;
-  }, [safeRounds]);
-  const competitionWinCounts = useMemo(() => {
-    const wins: Record<string, number> = {};
-    safeCompetitionRecords.forEach((competition) => {
-      const teamA = Array.isArray(competition?.teams?.A) ? competition.teams.A : [];
-      const teamB = Array.isArray(competition?.teams?.B) ? competition.teams.B : [];
-      if (competition.winner === "A") {
-        teamA.forEach((entry) => {
-          wins[entry.memberId] = (wins[entry.memberId] ?? 0) + 1;
-        });
-      }
-      if (competition.winner === "B") {
-        teamB.forEach((entry) => {
-          wins[entry.memberId] = (wins[entry.memberId] ?? 0) + 1;
-        });
-      }
-    });
-    return wins;
-  }, [safeCompetitionRecords]);
 
   async function refreshRounds() {
     const client: any = getSupabaseClient();
@@ -1074,7 +1016,10 @@ export default function Home() {
       ...current,
       [groupId]: buildRoundGroupDraft(group),
     }));
-    setEditingRoundGroupId(groupId);
+    setRoundViewModes((current) => ({
+      ...current,
+      [groupId]: "edit",
+    }));
   }
 
   function handleCancelRoundGroupDraft(group: RoundGroup) {
@@ -1083,7 +1028,10 @@ export default function Home() {
       ...current,
       [groupId]: buildRoundGroupDraft(group),
     }));
-    setEditingRoundGroupId(null);
+    setRoundViewModes((current) => ({
+      ...current,
+      [groupId]: "closed",
+    }));
   }
 
   async function handleSaveRoundGroup(group: RoundGroup) {
@@ -1131,7 +1079,10 @@ export default function Home() {
 
     const refreshed = await refreshRounds();
     if (!refreshed) return;
-    setEditingRoundGroupId(null);
+    setRoundViewModes((current) => ({
+      ...current,
+      [groupId]: "closed",
+    }));
     setStatusMessage("ラウンド履歴を更新しました。");
   }
 
@@ -1160,8 +1111,10 @@ export default function Home() {
 
     const refreshed = await refreshRounds();
     if (!refreshed) return;
-    setExpandedHistoryId(null);
-    setEditingRoundGroupId((current) => (current === getRoundGroupId(group.date, group.course) ? null : current));
+    setRoundViewModes((current) => ({
+      ...current,
+      [getRoundGroupId(group.date, group.course)]: "closed",
+    }));
     setStatusMessage("ラウンド履歴を削除しました。");
   }
 
@@ -1538,59 +1491,51 @@ export default function Home() {
       return;
     }
 
-    for (const member of selectedMembers) {
+    const rowsToInsert = selectedMembers.map((member) => {
       const scoreText = scoreDrafts[member.id] ?? "";
       const scoreValue = Number(scoreText);
       if (!scoreText.trim() || !Number.isFinite(scoreValue) || scoreValue <= 0) {
-        setLoading(false);
-        setStatusMessage("各メンバーのスコアを入力してください。");
-        return;
+        return null;
       }
 
-      const { data: existingRounds, error: existingError } = await client
-        .from("rounds")
-        .select("*")
-        .eq("member_id", member.id)
-        .eq("played_at", playedAt)
-        .eq("course_name", courseName);
+      return {
+        member_id: member.id,
+        played_at: playedAt,
+        course_name: courseName,
+        score: scoreValue,
+      };
+    });
 
-      if (existingError) {
-        setLoading(false);
-        setStatusMessage("スコア保存中にエラーが発生しました。再度お試しください。");
-        console.error(existingError);
-        return;
-      }
+    if (rowsToInsert.some((row) => row === null)) {
+      setLoading(false);
+      setStatusMessage("各メンバーのスコアを入力してください。");
+      return;
+    }
 
-      if ((existingRounds ?? []).length > 0) {
-        const existingRound = existingRounds?.[0];
-        const { error: updateError } = await client.from("rounds").update({ score: scoreValue }).eq("id", existingRound.id);
-        if (updateError) {
-          setLoading(false);
-          setStatusMessage("スコア更新に失敗しました。");
-          console.error(updateError);
-          return;
-        }
-      } else {
-        const { error: insertError } = await client.from("rounds").insert([
-          {
-            member_id: member.id,
-            played_at: playedAt,
-            course_name: courseName,
-            score: scoreValue,
-          },
-        ]);
-        if (insertError) {
-          setLoading(false);
-          setStatusMessage("スコア登録に失敗しました。");
-          console.error(insertError);
-          return;
-        }
-      }
+    const { error: insertError } = await client.from("rounds").insert(
+      rowsToInsert as Array<{
+        member_id: string;
+        played_at: string;
+        course_name: string;
+        score: number;
+      }>
+    );
+
+    if (insertError) {
+      setLoading(false);
+      console.error("round insert error:", insertError);
+      setStatusMessage(`スコア登録に失敗しました: ${insertError.message}`);
+      return;
+    }
+
+    const refreshed = await refreshRounds();
+    if (!refreshed) {
+      setLoading(false);
+      return;
     }
 
     setLoading(false);
     setStatusMessage("スコアを保存しました。");
-    await refreshRounds();
     setScoreDrafts({});
     setCompetitionScoreDrafts({});
     setNewRound({ courseName: "", playedAt: defaultPlayedAt });
@@ -1673,6 +1618,62 @@ export default function Home() {
 
   const selectedMembers = useMemo(() => safeMembers.filter((member) => selectedMemberIds.includes(member.id)), [safeMembers, selectedMemberIds]);
   const selectedMemberDetails = useMemo(() => stats.filter((stat) => selectedMemberIds.includes(stat.member.id)), [stats, selectedMemberIds]);
+  const activeCompetitionTeams = useMemo(() => {
+    if (competitionDraftTeams.A.length > 0 || competitionDraftTeams.B.length > 0) {
+      return competitionDraftTeams;
+    }
+    return {
+      A: competitionSplitPreview.teamA.map((stat) => stat.member),
+      B: competitionSplitPreview.teamB.map((stat) => stat.member),
+    };
+  }, [competitionDraftTeams, competitionSplitPreview]);
+  const competitionTeamRatings = useMemo(() => {
+    const getRating = (member: Member) => stats.find((stat) => stat.member.id === member.id)?.rating ?? 0;
+    return {
+      A: activeCompetitionTeams.A.reduce((sum, member) => sum + getRating(member), 0),
+      B: activeCompetitionTeams.B.reduce((sum, member) => sum + getRating(member), 0),
+    };
+  }, [activeCompetitionTeams, stats]);
+  const sortedCompetitionRecords = useMemo(() => safeCompetitionRecords.slice().sort((a, b) => b.date.localeCompare(a.date)), [safeCompetitionRecords]);
+  const roundWinCounts = useMemo(() => {
+    const wins: Record<string, number> = {};
+    const grouped = new Map<string, Round[]>();
+    safeRounds.forEach((round) => {
+      const key = `${round.played_at}::${round.course_name}`;
+      const existing = grouped.get(key) ?? [];
+      existing.push(round);
+      grouped.set(key, existing);
+    });
+
+    grouped.forEach((groupRounds) => {
+      if (groupRounds.length === 0) return;
+      const minScore = Math.min(...groupRounds.map((item) => item.score));
+      groupRounds
+        .filter((item) => item.score === minScore)
+        .forEach((winnerRound) => {
+          wins[winnerRound.member_id] = (wins[winnerRound.member_id] ?? 0) + 1;
+        });
+    });
+    return wins;
+  }, [safeRounds]);
+  const competitionWinCounts = useMemo(() => {
+    const wins: Record<string, number> = {};
+    safeCompetitionRecords.forEach((competition) => {
+      const teamA = Array.isArray(competition?.teams?.A) ? competition.teams.A : [];
+      const teamB = Array.isArray(competition?.teams?.B) ? competition.teams.B : [];
+      if (competition.winner === "A") {
+        teamA.forEach((entry) => {
+          wins[entry.memberId] = (wins[entry.memberId] ?? 0) + 1;
+        });
+      }
+      if (competition.winner === "B") {
+        teamB.forEach((entry) => {
+          wins[entry.memberId] = (wins[entry.memberId] ?? 0) + 1;
+        });
+      }
+    });
+    return wins;
+  }, [safeCompetitionRecords]);
   const activePlayerDetail = stats.find((stat) => stat.member.id === selectedRankingMemberId) ?? null;
   const visibleRoundGroups = showAllRoundHistories ? roundGroups : roundGroups.slice(0, 3);
 
@@ -1709,7 +1710,10 @@ export default function Home() {
       setShowAllRoundHistories(true);
     }
 
-    setExpandedHistoryId(pendingScrollRoundGroupId);
+    setRoundViewModes((current) => ({
+      ...current,
+      [pendingScrollRoundGroupId]: "details",
+    }));
     const node = roundGroupRefs.current[pendingScrollRoundGroupId];
     if (node) {
       window.requestAnimationFrame(() => {
@@ -1780,7 +1784,7 @@ export default function Home() {
 
                 <div className="mt-5 space-y-4">
                   <form onSubmit={handleSaveScores} className="space-y-4">
-                  <label className="block text-sm font-medium text-[#111111]">
+                  <label className="block min-w-0 text-sm font-medium text-[#111111]">
                     ゴルフ場
                     <input
                       value={newRound.courseName}
@@ -1790,13 +1794,13 @@ export default function Home() {
                     />
                   </label>
 
-                  <label className="block text-sm font-medium text-[#111111]">
+                  <label className="block min-w-0 text-sm font-medium text-[#111111]">
                     日付
                     <input
                       type="date"
                       value={newRound.playedAt}
                       onChange={(event) => setNewRound((current) => ({ ...current, playedAt: event.target.value }))}
-                      className="mt-2 h-[46px] w-full rounded-[18px] border border-[#d1d5db] bg-[#f9fafb] px-4 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                      className="date-input mt-2 h-[46px] w-full min-w-0 max-w-full rounded-[18px] border border-[#d1d5db] bg-[#f9fafb] px-4 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
                     />
                   </label>
 
@@ -1913,7 +1917,6 @@ export default function Home() {
                     <div className="mb-3 flex items-center justify-between gap-2">
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-[#111111]">メンバー</p>
-                        <p className="text-xs text-[#6b7280]">複数選択してスコアを入力できます。</p>
                       </div>
                       <div className="flex shrink-0 flex-nowrap items-center gap-2">
                         <button
@@ -2073,7 +2076,6 @@ export default function Home() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-[18px] font-semibold text-[#111111]">Tier表</h2>
-                    <p className="mt-1 text-sm text-[#6b7280]">レート点数に応じてS〜Cで分類します。</p>
                   </div>
                   <button
                     type="button"
@@ -2222,7 +2224,6 @@ export default function Home() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-[18px] font-semibold text-[#111111]">結果</h2>
-                    <p className="mt-1 text-sm text-[#6b7280]">通常ラウンド履歴と大会結果を確認できます。</p>
                   </div>
                 </div>
 
@@ -2237,7 +2238,6 @@ export default function Home() {
                     <div className="mb-3 flex items-center justify-between gap-2">
                       <div>
                         <p className="text-sm font-semibold text-[#111111]">通常ラウンド履歴</p>
-                        <p className="mt-1 text-sm text-[#6b7280]">日付とゴルフ場単位でまとめて表示します。</p>
                       </div>
                       <div className="flex items-center gap-2">
                         <button
@@ -2259,34 +2259,50 @@ export default function Home() {
                         {visibleRoundGroups.map((group) => {
                           const groupId = getRoundGroupId(group.date, group.course);
                           const draft = roundGroupDrafts[groupId] ?? buildRoundGroupDraft(group);
-                          const isOpen = expandedHistoryId === groupId;
-                          const isEditing = editingRoundGroupId === groupId;
+                          const viewMode = roundViewModes[groupId] ?? "closed";
+                          const isDetailsOpen = viewMode === "details";
+                          const isEditing = viewMode === "edit";
 
                           return (
                             <div key={groupId} ref={(node) => { roundGroupRefs.current[groupId] = node; }} className="rounded-[18px] border border-[#e5e7eb] bg-white p-2.5">
-                              {!isEditing ? (
-                                <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(56px,auto)] items-start gap-2">
-                                  <button type="button" onClick={() => setExpandedHistoryId(isOpen ? null : groupId)} className="col-span-2 grid gap-1 text-left">
-                                    <div className="min-w-0 text-left">
-                                      <p className="text-[13px] font-semibold leading-5 text-[#111111]">{formatDate(group.date)}</p>
-                                      <p className="mt-0.5 text-[12px] leading-5 text-[#6b7280] line-clamp-1">{group.course}</p>
-                                    </div>
-                                    <div className="text-left">
-                                      <p className="text-[12px] font-semibold leading-5 text-[#b91c1c]">🏆 優勝者</p>
-                                      <p className="text-[12px] leading-5 text-[#6b7280]">{group.minMemberName || "-"}（{group.minScore}）</p>
-                                    </div>
+                              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 min-w-0">
+                                <div className="grid gap-1 text-left min-w-0">
+                                  <div className="min-w-0 text-left">
+                                    <p className="text-[13px] font-semibold leading-5 text-[#111111]">{formatDate(group.date)}</p>
+                                    <p className="mt-0.5 text-[12px] leading-5 text-[#6b7280] line-clamp-1">{group.course}</p>
+                                  </div>
+                                  <div className="text-left">
+                                    <p className="text-[12px] font-semibold leading-5 text-[#b91c1c]">🏆 優勝者</p>
+                                    <p className="text-[12px] leading-5 text-[#6b7280]">{group.minMemberName || "-"}（{group.minScore}）</p>
+                                  </div>
+                                </div>
+                                <div className="flex shrink-0 items-start gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setRoundViewModes((current) => ({ ...current, [groupId]: viewMode === "details" ? "closed" : "details" }))}
+                                    className="h-11 min-w-[64px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#111111]"
+                                  >
+                                    {isDetailsOpen ? "閉じる" : "詳細"}
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() => handleStartRoundGroupEdit(group)}
-                                    className="h-10 min-w-[56px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111]"
+                                    onClick={() => {
+                                      if (isEditing) {
+                                        setRoundViewModes((current) => ({ ...current, [groupId]: "closed" }));
+                                      } else {
+                                        handleStartRoundGroupEdit(group);
+                                      }
+                                    }}
+                                    className="h-11 min-w-[64px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#111111]"
                                   >
-                                    編集
+                                    {isEditing ? "閉じる" : "編集"}
                                   </button>
                                 </div>
-                              ) : (
+                              </div>
+
+                              {isEditing ? (
                                 <div className="space-y-3">
-                                  <label className="block text-sm font-medium text-[#111111]">
+                                  <label className="block min-w-0 text-sm font-medium text-[#111111]">
                                     ゴルフ場
                                     <input
                                       value={draft.courseName}
@@ -2300,7 +2316,7 @@ export default function Home() {
                                       className="mt-1 h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
                                     />
                                   </label>
-                                  <label className="block text-sm font-medium text-[#111111]">
+                                  <label className="block min-w-0 text-sm font-medium text-[#111111]">
                                     日付
                                     <input
                                       type="date"
@@ -2312,7 +2328,7 @@ export default function Home() {
                                           [groupId]: { ...draft, playedAt: value },
                                         }));
                                       }}
-                                      className="mt-1 h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                      className="date-input mt-1 h-11 w-full min-w-0 max-w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
                                     />
                                   </label>
 
@@ -2349,16 +2365,16 @@ export default function Home() {
                                     <button type="button" onClick={() => handleDeleteRoundGroup(group)} className="h-11 rounded-[12px] bg-[#b91c1c] px-4 text-sm font-semibold text-white">ラウンド削除</button>
                                   </div>
                                 </div>
-                              )}
+                              ) : null}
 
-                              {!isEditing && isOpen ? (
+                              {isDetailsOpen ? (
                                 <div className="mt-3 space-y-2">
                                   {group.entries
                                     .slice()
                                     .sort((a, b) => a.score - b.score)
                                     .map((entry) => (
-                                      <div key={`${groupId}-${entry.memberId}`} className="rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] px-3 py-2 text-center">
-                                        <p className="text-sm text-[#111111]">{entry.memberName || entry.memberId}</p>
+                                      <div key={`${groupId}-${entry.memberId}`} className="flex items-center justify-between gap-3 rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] px-3 py-2 text-left">
+                                        <p className="min-w-0 truncate text-sm text-[#111111]">{entry.memberName || "-"}</p>
                                         <p className="mt-1 text-sm font-semibold text-[#111111]">{entry.score}</p>
                                       </div>
                                     ))}
