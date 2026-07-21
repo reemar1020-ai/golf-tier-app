@@ -53,6 +53,8 @@ type TabKey = "score" | "tier" | "results";
 
 type RoundViewMode = "closed" | "details" | "edit";
 
+type RankingView = "summary" | "rating" | "bestScore" | "nearPin" | "drivingContest";
+
 type ChampionshipResult = "win" | "runner-up" | "third" | "none";
 
 type CompetitionEntry = {
@@ -672,6 +674,7 @@ export default function Home() {
     playedAt: defaultPlayedAt,
   });
   const [expandedDetail, setExpandedDetail] = useState<"tier" | "ranking" | "teams" | null>("tier");
+  const [rankingView, setRankingView] = useState<RankingView>("summary");
   const [selectedRankingMemberId, setSelectedRankingMemberId] = useState<string | null>(null);
   const [teamVersion, setTeamVersion] = useState(0);
   const [isEditMembersMode, setIsEditMembersMode] = useState(false);
@@ -844,6 +847,26 @@ export default function Home() {
 
   const rankingByRate = useMemo(() => [...stats].sort((a, b) => b.rating - a.rating), [stats]);
   const rankingByBest = useMemo(() => [...stats].sort((a, b) => (a.bestScore ?? Number.POSITIVE_INFINITY) - (b.bestScore ?? Number.POSITIVE_INFINITY)), [stats]);
+  const rankingByNearPin = useMemo(
+    () =>
+      stats
+        .map((stat) => ({
+          stat,
+          nearPinTotal: stat.rounds.reduce((sum, round) => sum + (Number.isFinite(round.near_pin) ? round.near_pin : 0), 0),
+        }))
+        .sort((a, b) => b.nearPinTotal - a.nearPinTotal),
+    [stats]
+  );
+  const rankingByDrivingContest = useMemo(
+    () =>
+      stats
+        .map((stat) => ({
+          stat,
+          drivingContestTotal: stat.rounds.reduce((sum, round) => sum + (Number.isFinite(round.driving_contest) ? round.driving_contest : 0), 0),
+        }))
+        .sort((a, b) => b.drivingContestTotal - a.drivingContestTotal),
+    [stats]
+  );
   const teamSplit = useMemo(() => {
     const selectedStats = stats.filter((stat) => selectedMemberIds.includes(stat.member.id));
     return generateBalancedTeams(selectedStats);
@@ -2204,17 +2227,21 @@ export default function Home() {
                           <p className="text-sm font-semibold text-[#111111]">{tier === "S" ? "👑 Tier S" : `Tier ${tier}`}</p>
                           <span className="rounded-full bg-white/80 px-3 py-1 text-sm font-semibold text-[#111111]">{tierGroups[tier].length}</span>
                         </div>
-                        <div className="space-y-2">
+                        <div className="flex flex-wrap gap-2">
                           {tierGroups[tier].length === 0 ? (
                             <p className="text-sm text-[#6b7280]">まだデータがありません。</p>
                           ) : (
                             tierGroups[tier].map((stat) => (
-                              <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="w-full rounded-[16px] border border-white/70 bg-white p-3 text-left shadow-sm">
-                                <div className="flex items-center justify-between gap-3">
-                                  <PlayerAvatar member={stat.member} size={52} className="shrink-0" />
-                                  <p className="text-sm font-semibold text-[#111111]">{stat.rating}pt</p>
+                              <button
+                                key={stat.member.id}
+                                type="button"
+                                onClick={() => handleSelectPlayerDetail(stat.member.id)}
+                                className="flex min-h-[92px] min-w-[84px] flex-shrink-0 flex-col items-center justify-center rounded-[16px] border border-white/70 bg-white px-2 py-2 text-center shadow-sm"
+                              >
+                                <div className="min-w-0">
+                                  <PlayerAvatar member={stat.member} size={52} className="shrink-0" nameClassName="hidden" />
                                 </div>
-                                <p className="mt-1 text-xs text-[#4b5563]">Tier {stat.tier} / 平均 {stat.averageScore ?? "-"} / ベスト {stat.bestScore ?? "-"}</p>
+                                <p className="mt-1 text-sm font-semibold text-[#111111]">{stat.rating}点</p>
                               </button>
                             ))
                           )}
@@ -2229,11 +2256,18 @@ export default function Home() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-[18px] font-semibold text-[#111111]">個人ランキング</h2>
-                    <p className="mt-1 text-sm text-[#6b7280]">レート点数とベストスコアをランキング化します。</p>
                   </div>
                   <button
                     type="button"
-                    onClick={() => setExpandedDetail((current) => (current === "ranking" ? null : "ranking"))}
+                    onClick={() => {
+                      setExpandedDetail((current) => {
+                        const next = current === "ranking" ? null : "ranking";
+                        if (next === "ranking") {
+                          setRankingView("summary");
+                        }
+                        return next;
+                      });
+                    }}
                     className="rounded-full bg-[#111111] whitespace-nowrap min-w-[56px] h-11 px-4 text-sm flex items-center justify-center flex-shrink-0 font-semibold text-white"
                   >
                     {expandedDetail === "ranking" ? "閉じる" : "開く"}
@@ -2241,37 +2275,114 @@ export default function Home() {
                 </div>
 
                 {expandedDetail === "ranking" ? (
-                  <div className="mt-4 space-y-4">
-                    <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
-                      <p className="text-sm font-semibold text-[#111111]">レート点数ランキング</p>
-                      <div className="mt-3 space-y-2">
-                        {rankingByRate.map((stat, index) => (
-                          <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
-                            <div className="flex items-center gap-3">
-                              <span className="text-sm font-semibold text-[#111111]">{index + 1}.</span>
-                              <PlayerAvatar member={stat.member} size={48} className="shrink-0" />
-                            </div>
-                            <span className="text-sm font-semibold text-[#b91c1c]">{stat.rating}pt</span>
-                          </button>
-                        ))}
+                  <div className="mt-4 space-y-3">
+                    {rankingView === "summary" ? (
+                      <div className="space-y-2">
+                        <button type="button" onClick={() => setRankingView("rating")} className="flex h-11 w-full items-center justify-between rounded-[14px] border border-[#e5e7eb] bg-[#fafafa] px-3 text-left text-sm font-semibold text-[#111111]">
+                          <span className="truncate">レート点数ランキング</span>
+                          <span className="ml-2 shrink-0">&gt;</span>
+                        </button>
+                        <button type="button" onClick={() => setRankingView("bestScore")} className="flex h-11 w-full items-center justify-between rounded-[14px] border border-[#e5e7eb] bg-[#fafafa] px-3 text-left text-sm font-semibold text-[#111111]">
+                          <span className="truncate">ベストスコアランキング</span>
+                          <span className="ml-2 shrink-0">&gt;</span>
+                        </button>
+                        <button type="button" onClick={() => setRankingView("nearPin")} className="flex h-11 w-full items-center justify-between rounded-[14px] border border-[#e5e7eb] bg-[#fafafa] px-3 text-left text-sm font-semibold text-[#111111]">
+                          <span className="truncate">ニアピンランキング</span>
+                          <span className="ml-2 shrink-0">&gt;</span>
+                        </button>
+                        <button type="button" onClick={() => setRankingView("drivingContest")} className="flex h-11 w-full items-center justify-between rounded-[14px] border border-[#e5e7eb] bg-[#fafafa] px-3 text-left text-sm font-semibold text-[#111111]">
+                          <span className="truncate">ドラコンランキング</span>
+                          <span className="ml-2 shrink-0">&gt;</span>
+                        </button>
                       </div>
-                    </div>
-
-                    <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
-                      <p className="text-sm font-semibold text-[#111111]">ベストスコアランキング</p>
-                      <div className="mt-3 space-y-2">
-                        {rankingByBest.map((stat, index) => (
-                          <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
-                            <div className="flex items-center gap-3">
-                              <span className="text-sm font-semibold text-[#111111]">{index + 1}.</span>
-                              <PlayerAvatar member={stat.member} size={48} className="shrink-0" />
-                            </div>
-                            <span className="text-sm font-semibold text-[#111111]">{stat.bestScore ?? "-"}</span>
+                    ) : (
+                      <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                        <div className="mb-3 flex items-center justify-between gap-2">
+                          <p className="text-sm font-semibold text-[#111111]">
+                            {rankingView === "rating"
+                              ? "レート点数ランキング"
+                              : rankingView === "bestScore"
+                              ? "ベストスコアランキング"
+                              : rankingView === "nearPin"
+                              ? "ニアピンランキング"
+                              : "ドラコンランキング"}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setRankingView("summary");
+                            }}
+                            className="h-11 min-w-[64px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111]"
+                          >
+                            閉じる
                           </button>
-                        ))}
-                      </div>
-                    </div>
+                        </div>
 
+                        {rankingView === "rating" ? (
+                          <div className="space-y-2">
+                            {rankingByRate.map((stat, index) => (
+                              <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex min-h-[44px] w-full items-center justify-between rounded-[14px] border border-[#e5e7eb] bg-white px-3 py-2 text-left">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <span className="text-sm font-semibold text-[#111111]">{index + 1}位</span>
+                                  <PlayerAvatar member={stat.member} size={48} className="shrink-0" nameClassName="hidden" />
+                                  <span className="truncate text-sm font-semibold text-[#111111]">{stat.member.name}</span>
+                                </div>
+                                <div className="ml-2 shrink-0 text-right text-xs text-[#111111]">
+                                  <p className="text-sm font-semibold text-[#b91c1c]">{stat.rating}pt</p>
+                                  <p>Tier {stat.tier}</p>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        {rankingView === "bestScore" ? (
+                          <div className="space-y-2">
+                            {rankingByBest.map((stat, index) => (
+                              <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex min-h-[44px] w-full items-center justify-between rounded-[14px] border border-[#e5e7eb] bg-white px-3 py-2 text-left">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <span className="text-sm font-semibold text-[#111111]">{index + 1}位</span>
+                                  <PlayerAvatar member={stat.member} size={48} className="shrink-0" nameClassName="hidden" />
+                                  <span className="truncate text-sm font-semibold text-[#111111]">{stat.member.name}</span>
+                                </div>
+                                <span className="ml-2 shrink-0 text-sm font-semibold text-[#111111]">{stat.bestScore ?? "記録なし"}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        {rankingView === "nearPin" ? (
+                          <div className="space-y-2">
+                            {rankingByNearPin.map(({ stat, nearPinTotal }, index) => (
+                              <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex min-h-[44px] w-full items-center justify-between rounded-[14px] border border-[#e5e7eb] bg-white px-3 py-2 text-left">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <span className="text-sm font-semibold text-[#111111]">{index + 1}位</span>
+                                  <PlayerAvatar member={stat.member} size={48} className="shrink-0" nameClassName="hidden" />
+                                  <span className="truncate text-sm font-semibold text-[#111111]">{stat.member.name}</span>
+                                </div>
+                                <span className="ml-2 shrink-0 text-sm font-semibold text-[#111111]">{nearPinTotal}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        {rankingView === "drivingContest" ? (
+                          <div className="space-y-2">
+                            {rankingByDrivingContest.map(({ stat, drivingContestTotal }, index) => (
+                              <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex min-h-[44px] w-full items-center justify-between rounded-[14px] border border-[#e5e7eb] bg-white px-3 py-2 text-left">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <span className="text-sm font-semibold text-[#111111]">{index + 1}位</span>
+                                  <PlayerAvatar member={stat.member} size={48} className="shrink-0" nameClassName="hidden" />
+                                  <span className="truncate text-sm font-semibold text-[#111111]">{stat.member.name}</span>
+                                </div>
+                                <span className="ml-2 shrink-0 text-sm font-semibold text-[#111111]">{drivingContestTotal}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
                   </div>
                 ) : null}
               </section>
