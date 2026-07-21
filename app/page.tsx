@@ -1,11 +1,12 @@
 ﻿"use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { getSupabaseClient } from "@/lib/supabase";
 
 type Member = {
   id: string;
   name: string;
+  avatar_url?: string | null;
   created_at: string;
 };
 
@@ -113,11 +114,51 @@ function normalizeMembers(value: unknown): Member[] {
     const candidate = item as Record<string, unknown>;
     const id = typeof candidate.id === "string" ? candidate.id : "";
     const name = typeof candidate.name === "string" ? candidate.name : "";
+    const avatarUrl = typeof candidate.avatar_url === "string" ? candidate.avatar_url : null;
     const createdAt = typeof candidate.created_at === "string" ? candidate.created_at : "";
     if (!id || !name) return acc;
-    acc.push({ id, name, created_at: createdAt });
+    acc.push({ id, name, avatar_url: avatarUrl, created_at: createdAt });
     return acc;
   }, []);
+}
+
+function getMemberInitial(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) return "?";
+  return Array.from(trimmed)[0] ?? "?";
+}
+
+type PlayerAvatarProps = {
+  member: Pick<Member, "name" | "avatar_url">;
+  size?: number;
+  className?: string;
+  nameClassName?: string;
+};
+
+function PlayerAvatar({ member, size = 56, className = "", nameClassName = "" }: PlayerAvatarProps) {
+  const initial = getMemberInitial(member.name);
+  return (
+    <div className={`flex min-w-0 flex-col items-center gap-1 ${className}`.trim()}>
+      {member.avatar_url ? (
+        <img
+          src={member.avatar_url}
+          alt={`${member.name}のアイコン`}
+          className="player-avatar-image border border-[#e5e7eb] bg-[#f3f4f6]"
+          style={{ width: `${size}px`, height: `${size}px` }}
+          loading="lazy"
+        />
+      ) : (
+        <div
+          className="player-avatar-fallback flex items-center justify-center border border-[#d1d5db] bg-[#f3f4f6] text-[#374151]"
+          style={{ width: `${size}px`, height: `${size}px` }}
+          aria-label={`${member.name}の代替アイコン`}
+        >
+          <span className="text-lg font-semibold leading-none">{initial}</span>
+        </div>
+      )}
+      <span className={`max-w-full truncate text-center text-xs text-[#111111] ${nameClassName}`.trim()}>{member.name}</span>
+    </div>
+  );
 }
 
 function normalizeRounds(value: unknown): Round[] {
@@ -575,6 +616,7 @@ export default function Home() {
   const [isEditMembersMode, setIsEditMembersMode] = useState(false);
   const [editMemberId, setEditMemberId] = useState<string | null>(null);
   const [editMemberName, setEditMemberName] = useState("");
+  const [uploadingMemberId, setUploadingMemberId] = useState<string | null>(null);
   const [isCompetitionMode, setIsCompetitionMode] = useState(false);
   const [competitionRecords, setCompetitionRecords] = useState<CompetitionRecord[]>([]);
   const [isCompetitionEditing, setIsCompetitionEditing] = useState(false);
@@ -594,6 +636,7 @@ export default function Home() {
   const [scrollReturnY, setScrollReturnY] = useState<number | null>(null);
   const roundGroupRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const playerDetailRef = useRef<HTMLElement | null>(null);
+  const memberPhotoInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -1287,6 +1330,71 @@ export default function Home() {
     setStatusMessage("メンバー名を更新しました。");
   }
 
+  async function handleUploadMemberAvatar(memberId: string, file: File) {
+    const client: any = getSupabaseClient();
+    if (!client) {
+      setStatusMessage("Supabaseの接続設定がないため、更新できません。");
+      return;
+    }
+
+    setUploadingMemberId(memberId);
+    try {
+      const safeFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const filePath = `players/${memberId}/${Date.now()}-${safeFileName || "avatar.jpg"}`;
+
+      const { error: uploadError } = await client.storage.from("player-icons").upload(filePath, file, {
+        upsert: true,
+        contentType: file.type || undefined,
+      });
+
+      if (uploadError) {
+        console.error("member avatar upload error:", {
+          message: uploadError.message,
+          name: uploadError.name,
+          cause: uploadError.cause,
+        });
+        setStatusMessage(`画像アップロードエラー: ${uploadError.message}`);
+        return;
+      }
+
+      const { data: publicData } = client.storage.from("player-icons").getPublicUrl(filePath);
+      const avatarUrl = publicData?.publicUrl;
+      if (!avatarUrl) {
+        setStatusMessage("画像URLの取得に失敗しました。");
+        return;
+      }
+
+      const { error: updateError } = await client.from("members").update({ avatar_url: avatarUrl }).eq("id", memberId);
+      if (updateError) {
+        console.error("update member avatar error:", {
+          message: updateError.message,
+          code: updateError.code,
+          details: updateError.details,
+          hint: updateError.hint,
+        });
+        setStatusMessage(`アイコン更新エラー: ${updateError.message}`);
+        return;
+      }
+
+      await refreshMembers();
+      setStatusMessage("プレイヤーアイコンを更新しました。");
+    } catch (caughtError) {
+      console.error("member avatar upload thrown error:", caughtError);
+      const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
+      setStatusMessage(`アイコン更新エラー: ${message}`);
+    } finally {
+      setUploadingMemberId(null);
+      const input = memberPhotoInputRefs.current[memberId];
+      if (input) input.value = "";
+    }
+  }
+
+  function handleMemberAvatarInputChange(memberId: string, event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    void handleUploadMemberAvatar(memberId, file);
+  }
+
   async function handleSaveScores(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const client: any = getSupabaseClient();
@@ -1842,8 +1950,10 @@ export default function Home() {
                     {isEditMembersMode ? (
                       <div className="space-y-2">
                         {members.map((member) => (
-                          <div key={member.id} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-2">
-                            <div className="flex-1">
+                          <div key={member.id} className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <PlayerAvatar member={member} size={52} className="shrink-0" />
+                              <div className="flex-1">
                               {editMemberId === member.id ? (
                                 <input
                                   value={editMemberName}
@@ -1853,39 +1963,61 @@ export default function Home() {
                               ) : (
                                 <span className="text-sm font-semibold text-[#111111]">{member.name}</span>
                               )}
+                              </div>
                             </div>
-                            <div className="ml-3 flex items-center gap-2">
+
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              <input
+                                ref={(node) => {
+                                  memberPhotoInputRefs.current[member.id] = node;
+                                }}
+                                type="file"
+                                accept="image/*"
+                                onChange={(event) => handleMemberAvatarInputChange(member.id, event)}
+                                className="sr-only"
+                              />
                               <button
                                 type="button"
-                                onClick={() => {
-                                  if (editMemberId === member.id) {
-                                    handleUpdateMemberName(member.id);
-                                  } else {
-                                    setEditMemberId(member.id);
-                                    setEditMemberName(member.name);
-                                  }
-                                }}
-                                className="flex h-11 min-w-[44px] items-center justify-center rounded-full border border-[#d1d5db] px-3 text-lg"
+                                onClick={() => memberPhotoInputRefs.current[member.id]?.click()}
+                                disabled={uploadingMemberId === member.id}
+                                className="h-11 min-w-[120px] rounded-[12px] border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111] disabled:opacity-60"
                               >
-                                ✎
+                                {uploadingMemberId === member.id ? "アップロード中…" : "写真を選択"}
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (window.confirm("このメンバーを削除しますか？")) {
-                                    handleDeleteMember(member.id);
-                                  }
-                                }}
-                                className="flex h-11 min-w-[44px] items-center justify-center rounded-full bg-[#b91c1c] px-3 text-lg font-semibold text-white"
-                              >
-                                −
-                              </button>
+
+                              <div className="ml-auto flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (editMemberId === member.id) {
+                                      handleUpdateMemberName(member.id);
+                                    } else {
+                                      setEditMemberId(member.id);
+                                      setEditMemberName(member.name);
+                                    }
+                                  }}
+                                  className="flex h-11 min-w-[44px] items-center justify-center rounded-full border border-[#d1d5db] px-3 text-lg"
+                                >
+                                  ✎
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (window.confirm("このメンバーを削除しますか？")) {
+                                      handleDeleteMember(member.id);
+                                    }
+                                  }}
+                                  className="flex h-11 min-w-[44px] items-center justify-center rounded-full bg-[#b91c1c] px-3 text-lg font-semibold text-white"
+                                >
+                                  −
+                                </button>
+                              </div>
                             </div>
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <div className="flex flex-wrap gap-2">
+                      <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
                         {members.map((member) => {
                           const active = selectedMemberIds.includes(member.id);
                           return (
@@ -1893,9 +2025,9 @@ export default function Home() {
                               key={member.id}
                               type="button"
                               onClick={() => toggleMemberSelection(member.id)}
-                              className={`rounded-full border px-3 py-2 text-sm font-semibold ${active ? "border-[#b91c1c] bg-[#fef2f2] text-[#b91c1c]" : "border-[#d1d5db] bg-white text-[#111111]"}`}
+                              className={`min-h-[92px] rounded-[16px] border px-2 py-2 ${active ? "border-[#b91c1c] bg-[#fef2f2]" : "border-[#d1d5db] bg-white"}`}
                             >
-                              {member.name}
+                              <PlayerAvatar member={member} size={56} nameClassName={active ? "font-semibold text-[#b91c1c]" : "font-semibold text-[#111111]"} />
                             </button>
                           );
                         })}
@@ -1976,8 +2108,8 @@ export default function Home() {
                           ) : (
                             tierGroups[tier].map((stat) => (
                               <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="w-full rounded-[16px] border border-white/70 bg-white p-3 text-left shadow-sm">
-                                <div className="flex items-center justify-between gap-2">
-                                  <p className="text-sm font-semibold text-[#111111]">{stat.member.name}</p>
+                                <div className="flex items-center justify-between gap-3">
+                                  <PlayerAvatar member={stat.member} size={52} className="shrink-0" />
                                   <p className="text-sm font-semibold text-[#111111]">{stat.rating}pt</p>
                                 </div>
                                 <p className="mt-1 text-xs text-[#4b5563]">Tier {stat.tier} / 平均 {stat.averageScore ?? "-"} / ベスト {stat.bestScore ?? "-"}</p>
@@ -2013,7 +2145,10 @@ export default function Home() {
                       <div className="mt-3 space-y-2">
                         {rankingByRate.map((stat, index) => (
                           <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
-                            <span className="text-sm font-semibold text-[#111111]">{index + 1}. {stat.member.name}</span>
+                            <div className="flex items-center gap-3">
+                              <span className="text-sm font-semibold text-[#111111]">{index + 1}.</span>
+                              <PlayerAvatar member={stat.member} size={48} className="shrink-0" />
+                            </div>
                             <span className="text-sm font-semibold text-[#b91c1c]">{stat.rating}pt</span>
                           </button>
                         ))}
@@ -2025,7 +2160,10 @@ export default function Home() {
                       <div className="mt-3 space-y-2">
                         {rankingByBest.map((stat, index) => (
                           <button key={stat.member.id} type="button" onClick={() => handleSelectPlayerDetail(stat.member.id)} className="flex w-full items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-white px-3 py-3 text-left">
-                            <span className="text-sm font-semibold text-[#111111]">{index + 1}. {stat.member.name}</span>
+                            <div className="flex items-center gap-3">
+                              <span className="text-sm font-semibold text-[#111111]">{index + 1}.</span>
+                              <PlayerAvatar member={stat.member} size={48} className="shrink-0" />
+                            </div>
                             <span className="text-sm font-semibold text-[#111111]">{stat.bestScore ?? "-"}</span>
                           </button>
                         ))}
@@ -2039,7 +2177,10 @@ export default function Home() {
               {activePlayerDetail ? (
                 <section ref={playerDetailRef} className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm font-semibold text-[#111111]">{activePlayerDetail.member.name}の詳細</p>
+                    <div className="flex items-center gap-3">
+                      <PlayerAvatar member={activePlayerDetail.member} size={64} className="shrink-0" nameClassName="text-sm font-semibold" />
+                      <p className="text-sm font-semibold text-[#111111]">プレイヤー詳細</p>
+                    </div>
                     <button
                       type="button"
                       onClick={handleClosePlayerDetail}

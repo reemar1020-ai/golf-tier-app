@@ -77,3 +77,14 @@ button {
 .toast-message {
   animation: toast-pop 2s ease forwards;
 }
+
+.player-avatar-image,
+.player-avatar-fallback {
+  aspect-ratio: 1 / 1;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.player-avatar-image {
+  object-fit: cover;
+}
