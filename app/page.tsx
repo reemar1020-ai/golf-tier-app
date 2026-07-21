@@ -55,6 +55,10 @@ type RoundViewMode = "closed" | "details" | "edit";
 
 type RankingView = "summary" | "rating" | "bestScore" | "nearPin" | "drivingContest";
 
+type ResultView = "summary" | "roundHistory" | "competition";
+
+type TierPageView = "summary" | "tierTable" | "ranking";
+
 type ChampionshipResult = "win" | "runner-up" | "third" | "none";
 
 type CompetitionEntry = {
@@ -673,8 +677,9 @@ export default function Home() {
     courseName: "",
     playedAt: defaultPlayedAt,
   });
-  const [expandedDetail, setExpandedDetail] = useState<"tier" | "ranking" | "teams" | null>("tier");
+  const [tierPageView, setTierPageView] = useState<TierPageView>("summary");
   const [rankingView, setRankingView] = useState<RankingView>("summary");
+  const [resultView, setResultView] = useState<ResultView>("summary");
   const [selectedRankingMemberId, setSelectedRankingMemberId] = useState<string | null>(null);
   const [teamVersion, setTeamVersion] = useState(0);
   const [isEditMembersMode, setIsEditMembersMode] = useState(false);
@@ -694,13 +699,22 @@ export default function Home() {
   const [isCompetitionSettingsDeleting, setIsCompetitionSettingsDeleting] = useState(false);
   const [roundGroupDrafts, setRoundGroupDrafts] = useState<Record<string, RoundGroupEditDraft>>({});
   const [roundViewModes, setRoundViewModes] = useState<Record<string, RoundViewMode>>({});
-  const [showAllRoundHistories, setShowAllRoundHistories] = useState(false);
   const [pendingScrollRoundGroupId, setPendingScrollRoundGroupId] = useState<string | null>(null);
   const [savedToastVisible, setSavedToastVisible] = useState(false);
   const [scrollReturnY, setScrollReturnY] = useState<number | null>(null);
+  const [scoreFormErrors, setScoreFormErrors] = useState<{
+    courseName?: string;
+    playedAt?: string;
+    selectedMembers?: string;
+    scores: Record<string, string>;
+  }>({ scores: {} });
   const roundGroupRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const playerDetailRef = useRef<HTMLElement | null>(null);
   const memberPhotoInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const courseInputRef = useRef<HTMLInputElement | null>(null);
+  const dateInputRef = useRef<HTMLInputElement | null>(null);
+  const membersSectionRef = useRef<HTMLDivElement | null>(null);
+  const scoreInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -712,8 +726,8 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (members.length > 0 && (selectedMemberIds.length === 0 || selectedMemberIds.some((id) => !members.some((member) => member.id === id)))) {
-      setSelectedMemberIds(members.map((member) => member.id));
+    if (selectedMemberIds.length > 0 && selectedMemberIds.some((id) => !members.some((member) => member.id === id))) {
+      setSelectedMemberIds((current) => current.filter((id) => members.some((member) => member.id === id)));
     }
   }, [members, selectedMemberIds]);
 
@@ -1435,6 +1449,28 @@ export default function Home() {
     void handleUploadMemberAvatar(memberId, file);
   }
 
+  function focusScoreFormError(firstKey: "courseName" | "playedAt" | "selectedMembers" | "score", memberId?: string) {
+    if (firstKey === "courseName") {
+      courseInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      courseInputRef.current?.focus();
+      return;
+    }
+    if (firstKey === "playedAt") {
+      dateInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      dateInputRef.current?.focus();
+      return;
+    }
+    if (firstKey === "selectedMembers") {
+      membersSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (firstKey === "score" && memberId) {
+      const node = scoreInputRefs.current[memberId];
+      node?.scrollIntoView({ behavior: "smooth", block: "center" });
+      node?.focus();
+    }
+  }
+
   async function handleSaveScores(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const client: any = getSupabaseClient();
@@ -1447,6 +1483,12 @@ export default function Home() {
     const playedAt = newRound.playedAt.trim();
     if (!courseName || !playedAt) {
       setStatusMessage("ゴルフ場と日付を入力してください。");
+      setScoreFormErrors((current) => ({
+        ...current,
+        courseName: !courseName ? "ゴルフ場を入力してください" : undefined,
+        playedAt: !playedAt ? "日付を入力してください" : undefined,
+      }));
+      focusScoreFormError(!courseName ? "courseName" : "playedAt");
       return;
     }
 
@@ -1572,11 +1614,47 @@ export default function Home() {
     }
 
     const selectedMembers = members.filter((member) => selectedMemberIds.includes(member.id));
+    const nextErrors: {
+      courseName?: string;
+      playedAt?: string;
+      selectedMembers?: string;
+      scores: Record<string, string>;
+    } = { scores: {} };
+    let firstError: { key: "courseName" | "playedAt" | "selectedMembers" | "score"; memberId?: string } | null = null;
+
+    if (!courseName) {
+      nextErrors.courseName = "ゴルフ場を入力してください";
+      firstError = { key: "courseName" };
+    }
+    if (!playedAt) {
+      nextErrors.playedAt = "日付を入力してください";
+      if (!firstError) firstError = { key: "playedAt" };
+    }
     if (selectedMembers.length === 0) {
+      nextErrors.selectedMembers = "参加プレイヤーを選択してください";
+      if (!firstError) firstError = { key: "selectedMembers" };
+    }
+
+    selectedMembers.forEach((member) => {
+      const scoreText = scoreDrafts[member.id] ?? "";
+      const scoreValue = Number(scoreText);
+      if (!scoreText.trim() || !Number.isFinite(scoreValue) || scoreValue <= 0) {
+        nextErrors.scores[member.id] = `${member.name}さんのスコアを入力してください`;
+        if (!firstError) {
+          firstError = { key: "score", memberId: member.id };
+        }
+      }
+    });
+
+    if (firstError) {
+      setScoreFormErrors(nextErrors);
       setLoading(false);
-      setStatusMessage("メンバーを選択してください。");
+      setStatusMessage(nextErrors.courseName ?? nextErrors.playedAt ?? nextErrors.selectedMembers ?? nextErrors.scores[firstError.memberId ?? ""] ?? "入力内容を確認してください。");
+      focusScoreFormError(firstError.key, firstError.memberId);
       return;
     }
+
+    setScoreFormErrors({ scores: {} });
 
     const rowsToInsert = selectedMembers.map((member) => {
       const scoreText = scoreDrafts[member.id] ?? "";
@@ -1628,9 +1706,14 @@ export default function Home() {
 
     setLoading(false);
     setStatusMessage("スコアを保存しました。");
+    setScoreFormErrors({ scores: {} });
     setScoreDrafts({});
     setNearPinDrafts({});
     setDrivingContestDrafts({});
+    setSelectedMemberIds([]);
+    setIsEditMembersMode(false);
+    setEditMemberId(null);
+    setEditMemberName("");
     setCompetitionScoreDrafts({});
     setNewRound({ courseName: "", playedAt: defaultPlayedAt });
     setSavedToastVisible(true);
@@ -1769,8 +1852,6 @@ export default function Home() {
     return wins;
   }, [safeCompetitionRecords]);
   const activePlayerDetail = stats.find((stat) => stat.member.id === selectedRankingMemberId) ?? null;
-  const visibleRoundGroups = showAllRoundHistories ? roundGroups : roundGroups.slice(0, 3);
-
   function handleSelectPlayerDetail(memberId: string) {
     if (typeof window !== "undefined") {
       setScrollReturnY(window.scrollY);
@@ -1799,10 +1880,7 @@ export default function Home() {
     const exists = roundGroups.some((group) => getRoundGroupId(group.date, group.course) === pendingScrollRoundGroupId);
     if (!exists) return;
 
-    const topThreeIds = roundGroups.slice(0, 3).map((group) => getRoundGroupId(group.date, group.course));
-    if (!topThreeIds.includes(pendingScrollRoundGroupId)) {
-      setShowAllRoundHistories(true);
-    }
+    setResultView("roundHistory");
 
     setRoundViewModes((current) => ({
       ...current,
@@ -1815,7 +1893,7 @@ export default function Home() {
       });
       setPendingScrollRoundGroupId(null);
     }
-  }, [activeTab, pendingScrollRoundGroupId, roundGroups, showAllRoundHistories]);
+  }, [activeTab, pendingScrollRoundGroupId, roundGroups]);
 
   useEffect(() => {
     if (!selectedRankingMemberId || !playerDetailRef.current) return;
@@ -1881,21 +1959,37 @@ export default function Home() {
                   <label className="block min-w-0 text-sm font-medium text-[#111111]">
                     ゴルフ場
                     <input
+                      ref={courseInputRef}
                       value={newRound.courseName}
-                      onChange={(event) => setNewRound((current) => ({ ...current, courseName: event.target.value }))}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setNewRound((current) => ({ ...current, courseName: value }));
+                        if (value.trim()) {
+                          setScoreFormErrors((current) => ({ ...current, courseName: undefined }));
+                        }
+                      }}
                       placeholder="例: 霞ヶ関CC"
-                      className="mt-2 h-[46px] w-full rounded-[18px] border border-[#d1d5db] bg-[#f9fafb] px-4 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                      className={`mt-2 h-[46px] w-full rounded-[18px] border bg-[#f9fafb] px-4 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c] ${scoreFormErrors.courseName ? "border-[#dc2626]" : "border-[#d1d5db]"}`}
                     />
+                    {scoreFormErrors.courseName ? <p className="mt-1 text-xs font-medium text-[#dc2626]">{scoreFormErrors.courseName}</p> : null}
                   </label>
 
                   <label className="block min-w-0 text-sm font-medium text-[#111111]">
                     日付
                     <input
+                      ref={dateInputRef}
                       type="date"
                       value={newRound.playedAt}
-                      onChange={(event) => setNewRound((current) => ({ ...current, playedAt: event.target.value }))}
-                      className="date-input mt-2 h-[46px] w-full min-w-0 max-w-full rounded-[18px] border border-[#d1d5db] bg-[#f9fafb] px-4 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setNewRound((current) => ({ ...current, playedAt: value }));
+                        if (value.trim()) {
+                          setScoreFormErrors((current) => ({ ...current, playedAt: undefined }));
+                        }
+                      }}
+                      className={`date-input mt-2 h-[46px] w-full min-w-0 max-w-full rounded-[18px] border bg-[#f9fafb] px-4 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c] ${scoreFormErrors.playedAt ? "border-[#dc2626]" : "border-[#d1d5db]"}`}
                     />
+                    {scoreFormErrors.playedAt ? <p className="mt-1 text-xs font-medium text-[#dc2626]">{scoreFormErrors.playedAt}</p> : null}
                   </label>
 
                   {isCompetitionMode ? (
@@ -2007,7 +2101,7 @@ export default function Home() {
                   ) : null}
 
                   {!isCompetitionMode ? (
-                  <div className="rounded-[24px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+                  <div ref={membersSectionRef} className={`rounded-[24px] border bg-[#fafafa] p-3 ${scoreFormErrors.selectedMembers ? "border-[#dc2626]" : "border-[#e5e7eb]"}`}>
                     <div className="mb-3 flex items-center justify-between gap-2">
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-[#111111]">メンバー</p>
@@ -2015,10 +2109,18 @@ export default function Home() {
                       <div className="flex shrink-0 flex-nowrap items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => setIsEditMembersMode((current) => !current)}
+                          onClick={() => {
+                            if (isEditMembersMode) {
+                              setIsEditMembersMode(false);
+                              setEditMemberId(null);
+                              setEditMemberName("");
+                            } else {
+                              setIsEditMembersMode(true);
+                            }
+                          }}
                           className="flex h-11 min-w-[56px] items-center justify-center whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#111111]"
                         >
-                          編集
+                          {isEditMembersMode ? "完了" : "編集"}
                         </button>
                         <button
                           type="button"
@@ -2121,7 +2223,10 @@ export default function Home() {
                             <button
                               key={member.id}
                               type="button"
-                              onClick={() => toggleMemberSelection(member.id)}
+                              onClick={() => {
+                                toggleMemberSelection(member.id);
+                                setScoreFormErrors((current) => ({ ...current, selectedMembers: undefined }));
+                              }}
                               className={`min-h-[92px] rounded-[16px] border px-2 py-2 ${active ? "border-[#b91c1c] bg-[#fef2f2]" : "border-[#d1d5db] bg-white"}`}
                             >
                               <PlayerAvatar member={member} size={56} nameClassName={active ? "font-semibold text-[#b91c1c]" : "font-semibold text-[#111111]"} />
@@ -2130,6 +2235,7 @@ export default function Home() {
                         })}
                       </div>
                     )}
+                    {scoreFormErrors.selectedMembers ? <p className="mt-2 text-xs font-medium text-[#dc2626]">{scoreFormErrors.selectedMembers}</p> : null}
                   </div>
                   ) : null}
 
@@ -2138,21 +2244,36 @@ export default function Home() {
                       {selectedMembers.map((member) => (
                         <div key={member.id} className="rounded-[20px] border border-[#e5e7eb] bg-[#f9fafb] p-3">
                           <div className="mb-2 text-sm font-semibold text-[#111111]">{member.name}</div>
-                          <div className="grid gap-2 sm:grid-cols-3">
+                          <div className="grid grid-cols-3 gap-1.5">
                             <label className="block min-w-0 text-sm font-medium text-[#111111]">
-                              <span className="mb-1 block text-xs text-[#6b7280]">スコア</span>
+                              <span className="mb-1 block truncate text-[11px] text-[#6b7280]">スコア</span>
                               <input
+                                ref={(node) => {
+                                  scoreInputRefs.current[member.id] = node;
+                                }}
                                 type="number"
-                                min="1"
+                                min="0"
                                 step="1"
                                 inputMode="numeric"
                                 value={scoreDrafts[member.id] ?? ""}
-                                onChange={(event) => setScoreDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
-                                className="round-metric-input h-[46px] w-full min-w-0 rounded-[14px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setScoreDrafts((current) => ({ ...current, [member.id]: value }));
+                                  if (value.trim() && Number(value) > 0) {
+                                    setScoreFormErrors((current) => ({
+                                      ...current,
+                                      scores: {
+                                        ...current.scores,
+                                        [member.id]: "",
+                                      },
+                                    }));
+                                  }
+                                }}
+                                className={`round-metric-input h-[46px] w-full min-w-0 rounded-[14px] border bg-white px-2 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c] ${scoreFormErrors.scores[member.id] ? "border-[#dc2626]" : "border-[#d1d5db]"}`}
                               />
                             </label>
                             <label className="block min-w-0 text-sm font-medium text-[#111111]">
-                              <span className="mb-1 block text-xs text-[#6b7280]">ニアピン</span>
+                              <span className="mb-1 block truncate text-[11px] text-[#6b7280]">ニアピン回数</span>
                               <input
                                 type="number"
                                 min="0"
@@ -2160,11 +2281,11 @@ export default function Home() {
                                 inputMode="numeric"
                                 value={nearPinDrafts[member.id] ?? ""}
                                 onChange={(event) => setNearPinDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
-                                className="round-metric-input h-[46px] w-full min-w-0 rounded-[14px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                                className="round-metric-input h-[46px] w-full min-w-0 rounded-[14px] border border-[#d1d5db] bg-white px-2 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
                               />
                             </label>
                             <label className="block min-w-0 text-sm font-medium text-[#111111]">
-                              <span className="mb-1 block text-xs text-[#6b7280]">ドラコン</span>
+                              <span className="mb-1 block truncate text-[11px] text-[#6b7280]">ドラコン回数</span>
                               <input
                                 type="number"
                                 min="0"
@@ -2172,10 +2293,11 @@ export default function Home() {
                                 inputMode="numeric"
                                 value={drivingContestDrafts[member.id] ?? ""}
                                 onChange={(event) => setDrivingContestDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
-                                className="round-metric-input h-[46px] w-full min-w-0 rounded-[14px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                                className="round-metric-input h-[46px] w-full min-w-0 rounded-[14px] border border-[#d1d5db] bg-white px-2 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
                               />
                             </label>
                           </div>
+                          {scoreFormErrors.scores[member.id] ? <p className="mt-1 text-xs font-medium text-[#dc2626]">{scoreFormErrors.scores[member.id]}</p> : null}
                         </div>
                       ))}
                     </div>
@@ -2195,20 +2317,32 @@ export default function Home() {
             </div>
           ) : activeTab === "tier" ? (
             <div className="space-y-4">
-              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-[18px] font-semibold text-[#111111]">Tier表</h2>
-                  </div>
+              {tierPageView === "summary" ? (
+                <section className="space-y-3 rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                  <button type="button" onClick={() => setTierPageView("tierTable")} className="flex h-11 w-full items-center justify-between rounded-[14px] bg-[#f8fafc] px-3 text-left text-sm font-semibold text-[#111111]">
+                    <span>Tier表</span>
+                    <span className="text-[#6b7280]">&gt;</span>
+                  </button>
                   <button
                     type="button"
-                    onClick={() => setExpandedDetail((current) => (current === "tier" ? null : "tier"))}
-                    className="rounded-full bg-[#111111] whitespace-nowrap min-w-[56px] h-11 px-4 text-sm flex items-center justify-center flex-shrink-0 font-semibold text-white"
+                    onClick={() => {
+                      setRankingView("summary");
+                      setTierPageView("ranking");
+                    }}
+                    className="flex h-11 w-full items-center justify-between rounded-[14px] bg-[#f8fafc] px-3 text-left text-sm font-semibold text-[#111111]"
                   >
-                    {expandedDetail === "tier" ? "閉じる" : "開く"}
+                    <span>個人ランキング</span>
+                    <span className="text-[#6b7280]">&gt;</span>
                   </button>
-                </div>
-                {expandedDetail === "tier" ? (
+                </section>
+              ) : null}
+
+              {tierPageView === "tierTable" ? (
+                <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 className="text-[18px] font-semibold text-[#111111]">Tier表</h2>
+                    <button type="button" onClick={() => setTierPageView("summary")} className="h-8 whitespace-nowrap rounded-full bg-[#f3f4f6] px-3 text-xs font-semibold text-[#6b7280]">閉じる</button>
+                  </div>
                   <div className="mt-4 space-y-3">
                     {(["S", "A", "B", "C"] as const).map((tier) => (
                       <div
@@ -2223,10 +2357,7 @@ export default function Home() {
                             : "border-[#d1d5db] bg-[#f3f4f6]"
                         }`}
                       >
-                        <div className="mb-2 flex items-center justify-between">
-                          <p className="text-sm font-semibold text-[#111111]">{tier === "S" ? "👑 Tier S" : `Tier ${tier}`}</p>
-                          <span className="rounded-full bg-white/80 px-3 py-1 text-sm font-semibold text-[#111111]">{tierGroups[tier].length}</span>
-                        </div>
+                        <p className="mb-2 text-sm font-semibold text-[#111111]">{tier === "S" ? "👑 Tier S" : `Tier ${tier}`}</p>
                         <div className="flex flex-wrap gap-2">
                           {tierGroups[tier].length === 0 ? (
                             <p className="text-sm text-[#6b7280]">まだデータがありません。</p>
@@ -2238,9 +2369,7 @@ export default function Home() {
                                 onClick={() => handleSelectPlayerDetail(stat.member.id)}
                                 className="flex min-h-[92px] min-w-[84px] flex-shrink-0 flex-col items-center justify-center rounded-[16px] border border-white/70 bg-white px-2 py-2 text-center shadow-sm"
                               >
-                                <div className="min-w-0">
-                                  <PlayerAvatar member={stat.member} size={52} className="shrink-0" nameClassName="hidden" />
-                                </div>
+                                <PlayerAvatar member={stat.member} size={52} className="shrink-0" nameClassName="hidden" />
                                 <p className="mt-1 text-sm font-semibold text-[#111111]">{stat.rating}点</p>
                               </button>
                             ))
@@ -2249,32 +2378,16 @@ export default function Home() {
                       </div>
                     ))}
                   </div>
-                ) : null}
-              </section>
+                </section>
+              ) : null}
 
-              <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
+              {tierPageView === "ranking" ? (
+                <section className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
+                  <div className="flex items-center justify-between gap-3">
                     <h2 className="text-[18px] font-semibold text-[#111111]">個人ランキング</h2>
+                    <button type="button" onClick={() => setTierPageView("summary")} className="h-8 whitespace-nowrap rounded-full bg-[#f3f4f6] px-3 text-xs font-semibold text-[#6b7280]">閉じる</button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setExpandedDetail((current) => {
-                        const next = current === "ranking" ? null : "ranking";
-                        if (next === "ranking") {
-                          setRankingView("summary");
-                        }
-                        return next;
-                      });
-                    }}
-                    className="rounded-full bg-[#111111] whitespace-nowrap min-w-[56px] h-11 px-4 text-sm flex items-center justify-center flex-shrink-0 font-semibold text-white"
-                  >
-                    {expandedDetail === "ranking" ? "閉じる" : "開く"}
-                  </button>
-                </div>
 
-                {expandedDetail === "ranking" ? (
                   <div className="mt-4 space-y-3">
                     {rankingView === "summary" ? (
                       <div className="space-y-2">
@@ -2313,7 +2426,7 @@ export default function Home() {
                               event.stopPropagation();
                               setRankingView("summary");
                             }}
-                            className="h-11 min-w-[64px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111]"
+                            className="h-8 min-w-[52px] whitespace-nowrap rounded-full bg-[#f3f4f6] px-3 text-xs font-semibold text-[#6b7280]"
                           >
                             閉じる
                           </button>
@@ -2384,8 +2497,8 @@ export default function Home() {
                       </div>
                     )}
                   </div>
-                ) : null}
-              </section>
+                </section>
+              ) : null}
 
               {activePlayerDetail ? (
                 <section ref={playerDetailRef} className="rounded-[28px] border border-[#e7e5e4] bg-white p-4 shadow-sm">
@@ -2446,221 +2559,215 @@ export default function Home() {
                       まだラウンド履歴または大会結果がありません
                     </div>
                   ) : null}
+                  {resultView === "summary" ? (
+                    <button type="button" onClick={() => setResultView("roundHistory")} className="w-full rounded-[20px] bg-[#fafafa] p-4 text-left">
+                      <p className="text-sm font-semibold text-[#111111]">ラウンド履歴</p>
+                      <p className="mt-2 text-2xl font-semibold text-[#b91c1c]">{roundGroups.length}件</p>
+                    </button>
+                  ) : null}
 
-                  <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
-                    <div className="mb-3 flex items-center justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-semibold text-[#111111]">通常ラウンド履歴</p>
+                  {resultView === "roundHistory" ? (
+                    <div className="rounded-[20px] bg-[#fafafa] p-3">
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold text-[#111111]">ラウンド履歴</p>
+                        <button type="button" onClick={() => setResultView("summary")} className="h-10 w-10 rounded-full bg-[#111111] text-xl font-semibold text-white">×</button>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setShowAllRoundHistories((current) => !current)}
-                          className="h-10 min-w-[56px] whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-sm font-semibold text-[#111111]"
-                        >
-                          {showAllRoundHistories ? "閉じる" : "一覧"}
-                        </button>
-                        <span className="rounded-full bg-[#fef2f2] px-3 py-1 text-sm font-semibold text-[#b91c1c]">{roundGroups.length}</span>
-                      </div>
+                      {roundGroups.length === 0 ? (
+                        <p className="text-sm text-[#6b7280]">まだデータがありません。</p>
+                      ) : (
+                        <div className="space-y-3">
+                          {roundGroups.map((group) => {
+                            const groupId = getRoundGroupId(group.date, group.course);
+                            const draft = roundGroupDrafts[groupId] ?? buildRoundGroupDraft(group);
+                            const viewMode = roundViewModes[groupId] ?? "closed";
+                            const isDetailsOpen = viewMode === "details";
+                            const isEditing = viewMode === "edit";
+
+                            return (
+                              <div key={groupId} ref={(node) => { roundGroupRefs.current[groupId] = node; }} className="rounded-[18px] border border-[#e5e7eb] bg-white p-3">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (isEditing) return;
+                                    setRoundViewModes((current) => ({ ...current, [groupId]: isDetailsOpen ? "closed" : "details" }));
+                                  }}
+                                  className="w-full text-left"
+                                >
+                                  <p className="text-[13px] font-semibold leading-5 text-[#111111]">{formatDate(group.date)}</p>
+                                  <p className="mt-0.5 text-[12px] leading-5 text-[#6b7280] line-clamp-1">{group.course}</p>
+                                  <p className="mt-1 text-[12px] leading-5 text-[#6b7280]">優勝者：{group.minMemberName || "-"}（{group.minScore}）</p>
+                                </button>
+
+                                {isDetailsOpen && !isEditing ? (
+                                  <div className="mt-3">
+                                    <div className="mb-2 flex justify-end">
+                                      <button type="button" onClick={() => handleStartRoundGroupEdit(group)} className="h-10 rounded-full bg-[#111111] px-4 text-sm font-semibold text-white">編集</button>
+                                    </div>
+                                    <div className="flex flex-wrap gap-2">
+                                      {group.entries
+                                        .slice()
+                                        .sort((a, b) => a.score - b.score)
+                                        .map((entry) => {
+                                          const member = safeMembers.find((item) => item.id === entry.memberId) ?? { name: entry.memberName, avatar_url: null };
+                                          return (
+                                            <div key={`${groupId}-${entry.memberId}`} className="flex min-h-[44px] items-center gap-2 rounded-[14px] bg-[#f8fafc] px-2 py-2">
+                                              <PlayerAvatar member={member} size={42} className="shrink-0" nameClassName="hidden" />
+                                              <p className="max-w-[96px] truncate text-sm font-medium text-[#111111]">{entry.memberName}</p>
+                                              <p className="text-sm font-semibold text-[#111111]">{entry.score}</p>
+                                            </div>
+                                          );
+                                        })}
+                                    </div>
+                                  </div>
+                                ) : null}
+
+                                {isEditing ? (
+                                  <div className="mt-3 space-y-3">
+                                    <div className="flex justify-end">
+                                      <button type="button" onClick={() => handleSaveRoundGroup(group)} className="h-10 rounded-full bg-[#111111] px-4 text-sm font-semibold text-white">保存</button>
+                                    </div>
+                                    <label className="block min-w-0 text-sm font-medium text-[#111111]">
+                                      ゴルフ場
+                                      <input
+                                        value={draft.courseName}
+                                        onChange={(event) => {
+                                          const value = event.target.value;
+                                          setRoundGroupDrafts((current) => ({
+                                            ...current,
+                                            [groupId]: { ...draft, courseName: value },
+                                          }));
+                                        }}
+                                        className="mt-1 h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                      />
+                                    </label>
+                                    <label className="block min-w-0 text-sm font-medium text-[#111111]">
+                                      日付
+                                      <input
+                                        type="date"
+                                        value={draft.playedAt}
+                                        onChange={(event) => {
+                                          const value = event.target.value;
+                                          setRoundGroupDrafts((current) => ({
+                                            ...current,
+                                            [groupId]: { ...draft, playedAt: value },
+                                          }));
+                                        }}
+                                        className="date-input mt-1 h-11 w-full min-w-0 max-w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                      />
+                                    </label>
+
+                                    <div className="space-y-2">
+                                      {group.entries.map((entry) => (
+                                        <div key={`${groupId}-${entry.memberId}`} className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                                          <p className="mb-2 text-sm font-semibold text-[#111111]">{entry.memberName || entry.memberId}</p>
+                                          <div className="grid gap-2 sm:grid-cols-3">
+                                            <label className="block min-w-0 text-sm text-[#111111]">
+                                              <span className="mb-1 block text-xs text-[#6b7280]">スコア</span>
+                                              <input
+                                                type="number"
+                                                min="1"
+                                                step="1"
+                                                inputMode="numeric"
+                                                value={draft.scores[entry.roundId] ?? ""}
+                                                onChange={(event) => {
+                                                  const value = event.target.value;
+                                                  setRoundGroupDrafts((current) => ({
+                                                    ...current,
+                                                    [groupId]: {
+                                                      ...draft,
+                                                      scores: {
+                                                        ...draft.scores,
+                                                        [entry.roundId]: value,
+                                                      },
+                                                    },
+                                                  }));
+                                                }}
+                                                className="round-metric-input h-11 w-full min-w-0 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                              />
+                                            </label>
+                                            <label className="block min-w-0 text-sm text-[#111111]">
+                                              <span className="mb-1 block text-xs text-[#6b7280]">ニアピン</span>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="1"
+                                                inputMode="numeric"
+                                                value={draft.nearPins[entry.roundId] ?? "0"}
+                                                onChange={(event) => {
+                                                  const value = event.target.value;
+                                                  setRoundGroupDrafts((current) => ({
+                                                    ...current,
+                                                    [groupId]: {
+                                                      ...draft,
+                                                      nearPins: {
+                                                        ...draft.nearPins,
+                                                        [entry.roundId]: value,
+                                                      },
+                                                    },
+                                                  }));
+                                                }}
+                                                className="round-metric-input h-11 w-full min-w-0 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                              />
+                                            </label>
+                                            <label className="block min-w-0 text-sm text-[#111111]">
+                                              <span className="mb-1 block text-xs text-[#6b7280]">ドラコン</span>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="1"
+                                                inputMode="numeric"
+                                                value={draft.drivingContests[entry.roundId] ?? "0"}
+                                                onChange={(event) => {
+                                                  const value = event.target.value;
+                                                  setRoundGroupDrafts((current) => ({
+                                                    ...current,
+                                                    [groupId]: {
+                                                      ...draft,
+                                                      drivingContests: {
+                                                        ...draft.drivingContests,
+                                                        [entry.roundId]: value,
+                                                      },
+                                                    },
+                                                  }));
+                                                }}
+                                                className="round-metric-input h-11 w-full min-w-0 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                              />
+                                            </label>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-2">
+                                      <button type="button" onClick={() => handleDeleteRoundGroup(group)} className="h-10 rounded-full bg-[#dc2626] px-4 text-sm font-semibold text-white">削除</button>
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
-                    {showAllRoundHistories ? <p className="mb-3 text-xs font-semibold text-[#6b7280]">全ラウンド見出し表示</p> : null}
+                  ) : null}
 
-                    {roundGroups.length === 0 ? (
-                      <p className="text-sm text-[#6b7280]">まだデータがありません。</p>
+                  {resultView === "summary" ? (
+                    <button type="button" onClick={() => setResultView("competition")} className="w-full rounded-[20px] bg-[#fafafa] p-4 text-left">
+                      <p className="text-sm font-semibold text-[#111111]">大会結果</p>
+                      <p className="mt-2 text-2xl font-semibold text-[#b91c1c]">{safeCompetitionRecords.length}件</p>
+                    </button>
+                  ) : null}
+
+                  {resultView === "competition" ? (
+                    <div className="rounded-[20px] bg-[#fafafa] p-3">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <p className="text-sm font-semibold text-[#111111]">大会結果</p>
+                      <button type="button" onClick={() => setResultView("summary")} className="h-10 w-10 rounded-full bg-[#111111] text-xl font-semibold text-white">×</button>
+                    </div>
+                    {safeCompetitionRecords.length === 0 ? (
+                      <p className="text-sm text-[#6b7280]">まだ大会結果がありません。</p>
                     ) : (
                       <div className="space-y-3">
-                        {visibleRoundGroups.map((group) => {
-                          const groupId = getRoundGroupId(group.date, group.course);
-                          const draft = roundGroupDrafts[groupId] ?? buildRoundGroupDraft(group);
-                          const viewMode = roundViewModes[groupId] ?? "closed";
-                          const isDetailsOpen = viewMode === "details";
-                          const isEditing = viewMode === "edit";
-
-                          return (
-                            <div key={groupId} ref={(node) => { roundGroupRefs.current[groupId] = node; }} className="rounded-[18px] border border-[#e5e7eb] bg-white p-2.5">
-                              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 min-w-0">
-                                <div className="grid gap-1 text-left min-w-0">
-                                  <div className="min-w-0 text-left">
-                                    <p className="text-[13px] font-semibold leading-5 text-[#111111]">{formatDate(group.date)}</p>
-                                    <p className="mt-0.5 text-[12px] leading-5 text-[#6b7280] line-clamp-1">{group.course}</p>
-                                  </div>
-                                  <div className="text-left">
-                                    <p className="text-[12px] font-semibold leading-5 text-[#b91c1c]">🏆 優勝者</p>
-                                    <p className="text-[12px] leading-5 text-[#6b7280]">{group.minMemberName || "-"}（{group.minScore}）</p>
-                                  </div>
-                                </div>
-                                <div className="flex shrink-0 items-start gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => setRoundViewModes((current) => ({ ...current, [groupId]: viewMode === "details" ? "closed" : "details" }))}
-                                    className="h-11 min-w-[64px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#111111]"
-                                  >
-                                    {isDetailsOpen ? "閉じる" : "詳細"}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (isEditing) {
-                                        setRoundViewModes((current) => ({ ...current, [groupId]: "closed" }));
-                                      } else {
-                                        handleStartRoundGroupEdit(group);
-                                      }
-                                    }}
-                                    className="h-11 min-w-[64px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#111111]"
-                                  >
-                                    {isEditing ? "閉じる" : "編集"}
-                                  </button>
-                                </div>
-                              </div>
-
-                              {isEditing ? (
-                                <div className="space-y-3">
-                                  <label className="block min-w-0 text-sm font-medium text-[#111111]">
-                                    ゴルフ場
-                                    <input
-                                      value={draft.courseName}
-                                      onChange={(event) => {
-                                        const value = event.target.value;
-                                        setRoundGroupDrafts((current) => ({
-                                          ...current,
-                                          [groupId]: { ...draft, courseName: value },
-                                        }));
-                                      }}
-                                      className="mt-1 h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
-                                    />
-                                  </label>
-                                  <label className="block min-w-0 text-sm font-medium text-[#111111]">
-                                    日付
-                                    <input
-                                      type="date"
-                                      value={draft.playedAt}
-                                      onChange={(event) => {
-                                        const value = event.target.value;
-                                        setRoundGroupDrafts((current) => ({
-                                          ...current,
-                                          [groupId]: { ...draft, playedAt: value },
-                                        }));
-                                      }}
-                                      className="date-input mt-1 h-11 w-full min-w-0 max-w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
-                                    />
-                                  </label>
-
-                                  <div className="space-y-2">
-                                    {group.entries.map((entry) => (
-                                      <div key={`${groupId}-${entry.memberId}`} className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
-                                        <p className="mb-2 text-sm font-semibold text-[#111111]">{entry.memberName || entry.memberId}</p>
-                                        <div className="grid gap-2 sm:grid-cols-3">
-                                          <label className="block min-w-0 text-sm text-[#111111]">
-                                            <span className="mb-1 block text-xs text-[#6b7280]">スコア</span>
-                                            <input
-                                              type="number"
-                                              min="1"
-                                              step="1"
-                                              inputMode="numeric"
-                                              value={draft.scores[entry.roundId] ?? ""}
-                                              onChange={(event) => {
-                                                const value = event.target.value;
-                                                setRoundGroupDrafts((current) => ({
-                                                  ...current,
-                                                  [groupId]: {
-                                                    ...draft,
-                                                    scores: {
-                                                      ...draft.scores,
-                                                      [entry.roundId]: value,
-                                                    },
-                                                  },
-                                                }));
-                                              }}
-                                              className="round-metric-input h-11 w-full min-w-0 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
-                                            />
-                                          </label>
-                                          <label className="block min-w-0 text-sm text-[#111111]">
-                                            <span className="mb-1 block text-xs text-[#6b7280]">ニアピン</span>
-                                            <input
-                                              type="number"
-                                              min="0"
-                                              step="1"
-                                              inputMode="numeric"
-                                              value={draft.nearPins[entry.roundId] ?? "0"}
-                                              onChange={(event) => {
-                                                const value = event.target.value;
-                                                setRoundGroupDrafts((current) => ({
-                                                  ...current,
-                                                  [groupId]: {
-                                                    ...draft,
-                                                    nearPins: {
-                                                      ...draft.nearPins,
-                                                      [entry.roundId]: value,
-                                                    },
-                                                  },
-                                                }));
-                                              }}
-                                              className="round-metric-input h-11 w-full min-w-0 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
-                                            />
-                                          </label>
-                                          <label className="block min-w-0 text-sm text-[#111111]">
-                                            <span className="mb-1 block text-xs text-[#6b7280]">ドラコン</span>
-                                            <input
-                                              type="number"
-                                              min="0"
-                                              step="1"
-                                              inputMode="numeric"
-                                              value={draft.drivingContests[entry.roundId] ?? "0"}
-                                              onChange={(event) => {
-                                                const value = event.target.value;
-                                                setRoundGroupDrafts((current) => ({
-                                                  ...current,
-                                                  [groupId]: {
-                                                    ...draft,
-                                                    drivingContests: {
-                                                      ...draft.drivingContests,
-                                                      [entry.roundId]: value,
-                                                    },
-                                                  },
-                                                }));
-                                              }}
-                                              className="round-metric-input h-11 w-full min-w-0 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
-                                            />
-                                          </label>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-
-                                  <div className="flex flex-wrap gap-2">
-                                    <button type="button" onClick={() => handleSaveRoundGroup(group)} className="h-11 rounded-[12px] bg-[#111111] px-4 text-sm font-semibold text-white">保存</button>
-                                    <button type="button" onClick={() => handleCancelRoundGroupDraft(group)} className="h-11 rounded-[12px] border border-[#d1d5db] bg-white px-4 text-sm font-semibold text-[#111111]">キャンセル</button>
-                                    <button type="button" onClick={() => handleDeleteRoundGroup(group)} className="h-11 rounded-[12px] bg-[#b91c1c] px-4 text-sm font-semibold text-white">ラウンド削除</button>
-                                  </div>
-                                </div>
-                              ) : null}
-
-                              {isDetailsOpen ? (
-                                <div className="mt-3 space-y-2">
-                                  {group.entries
-                                    .slice()
-                                    .sort((a, b) => a.score - b.score)
-                                    .map((entry) => (
-                                      <div key={`${groupId}-${entry.memberId}`} className="flex items-center justify-between gap-3 rounded-[16px] border border-[#e5e7eb] bg-[#fafafa] px-3 py-2 text-left">
-                                        <p className="min-w-0 truncate text-sm text-[#111111]">{entry.memberName || "-"}</p>
-                                        <p className="mt-1 text-sm font-semibold text-[#111111]">{entry.score}</p>
-                                      </div>
-                                    ))}
-                                </div>
-                              ) : null}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="rounded-[20px] border border-[#e5e7eb] bg-[#fafafa] p-3">
-                    <p className="text-sm font-semibold text-[#111111]">大会結果</p>
-                    {safeCompetitionRecords.length === 0 ? (
-                      <p className="mt-2 text-sm text-[#6b7280]">まだ大会結果がありません。</p>
-                    ) : (
-                      <div className="mt-3 space-y-3">
                         {sortedCompetitionRecords.map((record) => {
                           const derived = getCompetitionDerived(record);
                           const isOpen = expandedCompetitionId === record.id;
@@ -2693,7 +2800,7 @@ export default function Home() {
                                       event.stopPropagation();
                                       isEditing ? handleCancelCompetitionEdit(record) : handleStartCompetitionEdit(record);
                                     }}
-                                    className="h-11 min-w-[56px] flex-shrink-0 whitespace-nowrap rounded-full border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#111111]"
+                                    className={`h-10 min-w-[64px] rounded-full px-4 text-sm font-semibold text-white ${isEditing ? "bg-[#6b7280]" : "bg-[#111111]"}`}
                                   >
                                     {isEditing ? "キャンセル" : "編集"}
                                   </button>
@@ -2781,9 +2888,9 @@ export default function Home() {
                                       </div>
 
                                       <div className="flex flex-wrap gap-2">
-                                        <button type="button" disabled={isCompetitionSettingsSaving || isCompetitionSettingsDeleting} onClick={() => handleSaveCompetitionEdit(record)} className="h-11 rounded-[12px] bg-[#111111] px-4 text-sm font-semibold text-white disabled:opacity-60">保存</button>
-                                        <button type="button" onClick={() => handleCancelCompetitionEdit(record)} className="h-11 rounded-[12px] border border-[#d1d5db] bg-white px-4 text-sm font-semibold text-[#111111]">キャンセル</button>
-                                        <button type="button" disabled={isCompetitionSettingsSaving || isCompetitionSettingsDeleting} onClick={() => handleDeleteCompetitionRecord(record.id)} className="h-11 rounded-[12px] bg-[#b91c1c] px-4 text-sm font-semibold text-white disabled:opacity-60">大会結果削除</button>
+                                        <button type="button" disabled={isCompetitionSettingsSaving || isCompetitionSettingsDeleting} onClick={() => handleSaveCompetitionEdit(record)} className="h-10 rounded-full bg-[#111111] px-4 text-sm font-semibold text-white disabled:opacity-60">保存</button>
+                                        <button type="button" onClick={() => handleCancelCompetitionEdit(record)} className="h-10 rounded-full bg-[#6b7280] px-4 text-sm font-semibold text-white">キャンセル</button>
+                                        <button type="button" disabled={isCompetitionSettingsSaving || isCompetitionSettingsDeleting} onClick={() => handleDeleteCompetitionRecord(record.id)} className="h-10 rounded-full bg-[#dc2626] px-4 text-sm font-semibold text-white disabled:opacity-60">削除</button>
                                       </div>
                                     </div>
                                   ) : (
@@ -2862,6 +2969,7 @@ export default function Home() {
                       </div>
                     )}
                   </div>
+                  ) : null}
                 </div>
               </section>
             </div>
