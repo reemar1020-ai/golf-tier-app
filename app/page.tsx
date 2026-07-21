@@ -16,6 +16,8 @@ type Round = {
   played_at: string;
   course_name: string;
   score: number;
+  near_pin: number;
+  driving_contest: number;
   created_at: string;
 };
 
@@ -36,9 +38,12 @@ type RoundGroup = {
   date: string;
   course: string;
   entries: Array<{
+    roundId: string;
     memberId: string;
     memberName: string;
     score: number;
+    nearPin: number;
+    drivingContest: number;
   }>;
   minScore: number;
   minMemberName: string;
@@ -91,6 +96,8 @@ type RoundGroupEditDraft = {
   playedAt: string;
   courseName: string;
   scores: Record<string, string>;
+  nearPins: Record<string, string>;
+  drivingContests: Record<string, string>;
 };
 
 type CompetitionEditMemberDraft = {
@@ -174,9 +181,13 @@ function normalizeRounds(value: unknown): Round[] {
     const courseName = typeof candidate.course_name === "string" ? candidate.course_name : "";
     const numericScore = Number(candidate.score);
     const score = Number.isFinite(numericScore) ? numericScore : 0;
+    const numericNearPin = Number(candidate.near_pin);
+    const nearPin = Number.isFinite(numericNearPin) ? numericNearPin : 0;
+    const numericDrivingContest = Number(candidate.driving_contest);
+    const drivingContest = Number.isFinite(numericDrivingContest) ? numericDrivingContest : 0;
     const createdAt = typeof candidate.created_at === "string" ? candidate.created_at : "";
     if (!id || !memberId || !playedAt || !courseName) return acc;
-    acc.push({ id, member_id: memberId, played_at: playedAt, course_name: courseName, score, created_at: createdAt });
+    acc.push({ id, member_id: memberId, played_at: playedAt, course_name: courseName, score, near_pin: nearPin, driving_contest: drivingContest, created_at: createdAt });
     return acc;
   }, []);
 }
@@ -316,6 +327,30 @@ function getBestScore(rounds: Round[], days: number) {
   return Math.min(...recentRounds.map((round) => round.score));
 }
 
+function getRoundGroupSpecialWinCounts(rounds: Round[], field: "near_pin" | "driving_contest") {
+  const grouped = new Map<string, Round[]>();
+  rounds.forEach((round) => {
+    const key = `${round.played_at}::${round.course_name}`;
+    const existing = grouped.get(key) ?? [];
+    existing.push(round);
+    grouped.set(key, existing);
+  });
+
+  const counts: Record<string, number> = {};
+  grouped.forEach((groupRounds) => {
+    if (groupRounds.length === 0) return;
+    const maxValue = Math.max(...groupRounds.map((item) => Number(item[field]) || 0));
+    if (maxValue <= 0) return;
+    groupRounds
+      .filter((item) => (Number(item[field]) || 0) === maxValue)
+      .forEach((winnerRound) => {
+        counts[winnerRound.member_id] = (counts[winnerRound.member_id] ?? 0) + 1;
+      });
+  });
+
+  return counts;
+}
+
 function getScorePoints(averageScore: number | null) {
   if (averageScore === null) return 0;
   if (averageScore <= 79) return 200;
@@ -339,10 +374,12 @@ function calculateTier(rating: number) {
   return "C";
 }
 
-function calculateRating(rounds: Round[], championshipResult: ChampionshipResult) {
+function calculateRating(rounds: Round[], allRounds: Round[], memberId: string, championshipResult: ChampionshipResult) {
   const recentThreeMonthAverage = getRecentAverage(rounds, 90);
   const recentOneYearAverage = getRecentAverage(rounds, 365);
   const recentBestScore = getBestScore(rounds, 365);
+  const nearPinWins = getRoundGroupSpecialWinCounts(allRounds, "near_pin")[memberId] ?? 0;
+  const drivingContestWins = getRoundGroupSpecialWinCounts(allRounds, "driving_contest")[memberId] ?? 0;
 
   let points = getScorePoints(recentThreeMonthAverage);
 
@@ -362,6 +399,8 @@ function calculateRating(rounds: Round[], championshipResult: ChampionshipResult
     points += 15;
   }
 
+  points += (nearPinWins + drivingContestWins) * 10;
+
   const resultBonus =
     championshipResult === "win"
       ? 15
@@ -374,10 +413,12 @@ function calculateRating(rounds: Round[], championshipResult: ChampionshipResult
   return points + resultBonus;
 }
 
-function calculateRatingBreakdown(rounds: Round[], championshipResult: ChampionshipResult) {
+function calculateRatingBreakdown(rounds: Round[], allRounds: Round[], memberId: string, championshipResult: ChampionshipResult) {
   const recentThreeMonthAverage = getRecentAverage(rounds, 90);
   const recentOneYearAverage = getRecentAverage(rounds, 365);
   const recentBestScore = getBestScore(rounds, 365);
+  const nearPinWins = getRoundGroupSpecialWinCounts(allRounds, "near_pin")[memberId] ?? 0;
+  const drivingContestWins = getRoundGroupSpecialWinCounts(allRounds, "driving_contest")[memberId] ?? 0;
 
   const recentThreeMonthPoints = getScorePoints(recentThreeMonthAverage);
   const bestScoreBonus =
@@ -400,13 +441,17 @@ function calculateRatingBreakdown(rounds: Round[], championshipResult: Champions
       : championshipResult === "third"
       ? 5
       : 0;
+  const nearPinBonus = nearPinWins * 10;
+  const drivingContestBonus = drivingContestWins * 10;
 
   return {
     recentThreeMonthPoints,
     bestScoreBonus,
     growthBonus,
     clutchBonus,
-    total: recentThreeMonthPoints + bestScoreBonus + growthBonus + clutchBonus,
+    nearPinBonus,
+    drivingContestBonus,
+    total: recentThreeMonthPoints + bestScoreBonus + growthBonus + clutchBonus + nearPinBonus + drivingContestBonus,
   };
 }
 
@@ -430,9 +475,12 @@ function groupRoundsByDateAndCourse(rounds: Round[], members: Member[]) {
     const group = grouped.get(key)!;
     const memberName = memberNameById[round.member_id] ?? "未登録";
     group.entries.push({
+      roundId: round.id,
       memberId: round.member_id,
       memberName,
       score: round.score,
+      nearPin: round.near_pin ?? 0,
+      drivingContest: round.driving_contest ?? 0,
     });
 
     if (round.score < group.minScore) {
@@ -517,13 +565,23 @@ function getRoundGroupId(date: string, course: string) {
 
 function buildRoundGroupDraft(group: RoundGroup): RoundGroupEditDraft {
   const scores = group.entries.reduce<Record<string, string>>((acc, entry) => {
-    acc[entry.memberId] = String(entry.score);
+    acc[entry.roundId] = String(entry.score);
+    return acc;
+  }, {});
+  const nearPins = group.entries.reduce<Record<string, string>>((acc, entry) => {
+    acc[entry.roundId] = String(entry.nearPin ?? 0);
+    return acc;
+  }, {});
+  const drivingContests = group.entries.reduce<Record<string, string>>((acc, entry) => {
+    acc[entry.roundId] = String(entry.drivingContest ?? 0);
     return acc;
   }, {});
   return {
     playedAt: group.date,
     courseName: group.course,
     scores,
+    nearPins,
+    drivingContests,
   };
 }
 
@@ -607,6 +665,8 @@ export default function Home() {
   const [isMemberComposerOpen, setIsMemberComposerOpen] = useState(false);
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [scoreDrafts, setScoreDrafts] = useState<Record<string, string>>({});
+  const [nearPinDrafts, setNearPinDrafts] = useState<Record<string, string>>({});
+  const [drivingContestDrafts, setDrivingContestDrafts] = useState<Record<string, string>>({});
   const [newRound, setNewRound] = useState({
     courseName: "",
     playedAt: defaultPlayedAt,
@@ -751,7 +811,7 @@ export default function Home() {
       const recentAverage = scores.length > 0 ? Number((scores.slice(0, 5).reduce((sum, score) => sum + score, 0) / Math.min(scores.slice(0, 5).length, 5)).toFixed(1)) : null;
       const recentThreeMonthAverage = getRecentAverage(memberRounds, 90);
       const recentOneYearAverage = getRecentAverage(memberRounds, 365);
-      const rating = calculateRating(memberRounds, championshipResults[member.id] ?? "none");
+      const rating = calculateRating(memberRounds, safeRounds, member.id, championshipResults[member.id] ?? "none");
       const tier = calculateTier(rating);
 
       return {
@@ -1052,8 +1112,12 @@ export default function Home() {
     }
 
     for (const entry of group.entries) {
-      const scoreText = draft.scores[entry.memberId] ?? "";
+      const scoreText = draft.scores[entry.roundId] ?? "";
+      const nearPinText = draft.nearPins[entry.roundId] ?? "0";
+      const drivingContestText = draft.drivingContests[entry.roundId] ?? "0";
       const score = Number(scoreText);
+      const nearPin = Number(nearPinText);
+      const drivingContest = Number(drivingContestText);
       if (!scoreText.trim() || !Number.isFinite(score) || score <= 0) {
         setStatusMessage("各メンバーのスコアを正しく入力してください。");
         return;
@@ -1065,10 +1129,10 @@ export default function Home() {
           played_at: playedAt,
           course_name: courseName,
           score,
+          near_pin: Number.isFinite(nearPin) && nearPin >= 0 ? Math.floor(nearPin) : 0,
+          driving_contest: Number.isFinite(drivingContest) && drivingContest >= 0 ? Math.floor(drivingContest) : 0,
         })
-        .eq("member_id", entry.memberId)
-        .eq("played_at", group.date)
-        .eq("course_name", group.course);
+        .eq("id", entry.roundId);
 
       if (error) {
         console.error("round update/delete error:", error);
@@ -1498,11 +1562,16 @@ export default function Home() {
         return null;
       }
 
+      const nearPinValue = Number(nearPinDrafts[member.id] ?? 0);
+      const drivingContestValue = Number(drivingContestDrafts[member.id] ?? 0);
+
       return {
         member_id: member.id,
         played_at: playedAt,
         course_name: courseName,
         score: scoreValue,
+        near_pin: Number.isFinite(nearPinValue) && nearPinValue >= 0 ? Math.floor(nearPinValue) : 0,
+        driving_contest: Number.isFinite(drivingContestValue) && drivingContestValue >= 0 ? Math.floor(drivingContestValue) : 0,
       };
     });
 
@@ -1537,6 +1606,8 @@ export default function Home() {
     setLoading(false);
     setStatusMessage("スコアを保存しました。");
     setScoreDrafts({});
+    setNearPinDrafts({});
+    setDrivingContestDrafts({});
     setCompetitionScoreDrafts({});
     setNewRound({ courseName: "", playedAt: defaultPlayedAt });
     setSavedToastVisible(true);
@@ -2042,18 +2113,47 @@ export default function Home() {
                   {!isCompetitionMode ? selectedMembers.length > 0 ? (
                     <div className="space-y-3">
                       {selectedMembers.map((member) => (
-                        <label key={member.id} className="block rounded-[20px] border border-[#e5e7eb] bg-[#f9fafb] p-3">
+                        <div key={member.id} className="rounded-[20px] border border-[#e5e7eb] bg-[#f9fafb] p-3">
                           <div className="mb-2 text-sm font-semibold text-[#111111]">{member.name}</div>
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            pattern="[0-9]*"
-                            value={scoreDrafts[member.id] ?? ""}
-                            onChange={(event) => setScoreDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
-                            placeholder="スコア"
-                            className="h-[46px] w-full rounded-[14px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
-                          />
-                        </label>
+                          <div className="grid gap-2 sm:grid-cols-3">
+                            <label className="block min-w-0 text-sm font-medium text-[#111111]">
+                              <span className="mb-1 block text-xs text-[#6b7280]">スコア</span>
+                              <input
+                                type="number"
+                                min="1"
+                                step="1"
+                                inputMode="numeric"
+                                value={scoreDrafts[member.id] ?? ""}
+                                onChange={(event) => setScoreDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
+                                className="round-metric-input h-[46px] w-full min-w-0 rounded-[14px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                              />
+                            </label>
+                            <label className="block min-w-0 text-sm font-medium text-[#111111]">
+                              <span className="mb-1 block text-xs text-[#6b7280]">ニアピン</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                inputMode="numeric"
+                                value={nearPinDrafts[member.id] ?? ""}
+                                onChange={(event) => setNearPinDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
+                                className="round-metric-input h-[46px] w-full min-w-0 rounded-[14px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                              />
+                            </label>
+                            <label className="block min-w-0 text-sm font-medium text-[#111111]">
+                              <span className="mb-1 block text-xs text-[#6b7280]">ドラコン</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                inputMode="numeric"
+                                value={drivingContestDrafts[member.id] ?? ""}
+                                onChange={(event) => setDrivingContestDrafts((current) => ({ ...current, [member.id]: event.target.value }))}
+                                className="round-metric-input h-[46px] w-full min-w-0 rounded-[14px] border border-[#d1d5db] bg-white px-3 text-[16px] text-[#111111] outline-none focus:border-[#b91c1c]"
+                              />
+                            </label>
+                          </div>
+                        </div>
                       ))}
                     </div>
                   ) : (
@@ -2192,7 +2292,7 @@ export default function Home() {
                     </button>
                   </div>
                   {(() => {
-                    const breakdown = calculateRatingBreakdown(activePlayerDetail.rounds, championshipResults[activePlayerDetail.member.id] ?? "none");
+                    const breakdown = calculateRatingBreakdown(activePlayerDetail.rounds, safeRounds, activePlayerDetail.member.id, championshipResults[activePlayerDetail.member.id] ?? "none");
                     const normalRoundWins = roundWinCounts[activePlayerDetail.member.id] ?? 0;
                     const competitionWins = competitionWinCounts[activePlayerDetail.member.id] ?? 0;
                     return (
@@ -2205,6 +2305,8 @@ export default function Home() {
                           <p className="mt-1">直近3カ月平均による点数: {breakdown.recentThreeMonthPoints}pt</p>
                           <p className="mt-1">ベストスコア加点: {breakdown.bestScoreBonus}pt</p>
                           <p className="mt-1">成長率加点: {breakdown.growthBonus}pt</p>
+                          <p className="mt-1">ニアピン1位加点: {breakdown.nearPinBonus}pt</p>
+                          <p className="mt-1">ドラコン1位加点: {breakdown.drivingContestBonus}pt</p>
                           <p className="mt-1">勝負強さ加点: {breakdown.clutchBonus}pt</p>
                           <p className="mt-1 font-semibold">合計点: {breakdown.total}pt</p>
                         </div>
@@ -2334,28 +2436,83 @@ export default function Home() {
 
                                   <div className="space-y-2">
                                     {group.entries.map((entry) => (
-                                      <label key={`${groupId}-${entry.memberId}`} className="block text-sm text-[#111111]">
-                                        <span className="mb-1 block">{entry.memberName || entry.memberId}</span>
-                                        <input
-                                          type="text"
-                                          inputMode="numeric"
-                                          value={draft.scores[entry.memberId] ?? ""}
-                                          onChange={(event) => {
-                                            const value = event.target.value;
-                                            setRoundGroupDrafts((current) => ({
-                                              ...current,
-                                              [groupId]: {
-                                                ...draft,
-                                                scores: {
-                                                  ...draft.scores,
-                                                  [entry.memberId]: value,
-                                                },
-                                              },
-                                            }));
-                                          }}
-                                          className="h-11 w-full rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
-                                        />
-                                      </label>
+                                      <div key={`${groupId}-${entry.memberId}`} className="rounded-[16px] border border-[#e5e7eb] bg-white p-3">
+                                        <p className="mb-2 text-sm font-semibold text-[#111111]">{entry.memberName || entry.memberId}</p>
+                                        <div className="grid gap-2 sm:grid-cols-3">
+                                          <label className="block min-w-0 text-sm text-[#111111]">
+                                            <span className="mb-1 block text-xs text-[#6b7280]">スコア</span>
+                                            <input
+                                              type="number"
+                                              min="1"
+                                              step="1"
+                                              inputMode="numeric"
+                                              value={draft.scores[entry.roundId] ?? ""}
+                                              onChange={(event) => {
+                                                const value = event.target.value;
+                                                setRoundGroupDrafts((current) => ({
+                                                  ...current,
+                                                  [groupId]: {
+                                                    ...draft,
+                                                    scores: {
+                                                      ...draft.scores,
+                                                      [entry.roundId]: value,
+                                                    },
+                                                  },
+                                                }));
+                                              }}
+                                              className="round-metric-input h-11 w-full min-w-0 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                            />
+                                          </label>
+                                          <label className="block min-w-0 text-sm text-[#111111]">
+                                            <span className="mb-1 block text-xs text-[#6b7280]">ニアピン</span>
+                                            <input
+                                              type="number"
+                                              min="0"
+                                              step="1"
+                                              inputMode="numeric"
+                                              value={draft.nearPins[entry.roundId] ?? "0"}
+                                              onChange={(event) => {
+                                                const value = event.target.value;
+                                                setRoundGroupDrafts((current) => ({
+                                                  ...current,
+                                                  [groupId]: {
+                                                    ...draft,
+                                                    nearPins: {
+                                                      ...draft.nearPins,
+                                                      [entry.roundId]: value,
+                                                    },
+                                                  },
+                                                }));
+                                              }}
+                                              className="round-metric-input h-11 w-full min-w-0 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                            />
+                                          </label>
+                                          <label className="block min-w-0 text-sm text-[#111111]">
+                                            <span className="mb-1 block text-xs text-[#6b7280]">ドラコン</span>
+                                            <input
+                                              type="number"
+                                              min="0"
+                                              step="1"
+                                              inputMode="numeric"
+                                              value={draft.drivingContests[entry.roundId] ?? "0"}
+                                              onChange={(event) => {
+                                                const value = event.target.value;
+                                                setRoundGroupDrafts((current) => ({
+                                                  ...current,
+                                                  [groupId]: {
+                                                    ...draft,
+                                                    drivingContests: {
+                                                      ...draft.drivingContests,
+                                                      [entry.roundId]: value,
+                                                    },
+                                                  },
+                                                }));
+                                              }}
+                                              className="round-metric-input h-11 w-full min-w-0 rounded-[12px] border border-[#d1d5db] bg-[#f9fafb] px-3 text-[16px] text-[#111111]"
+                                            />
+                                          </label>
+                                        </div>
+                                      </div>
                                     ))}
                                   </div>
 
