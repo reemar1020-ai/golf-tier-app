@@ -121,6 +121,10 @@ type CompetitionEditDraft = {
 };
 
 const defaultPlayedAt = new Date().toISOString().slice(0, 10);
+const AVATAR_BUCKET = "player-icons";
+const AVATAR_MAX_SIZE_BYTES = 10 * 1024 * 1024;
+const ALLOWED_AVATAR_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
+const ALLOWED_AVATAR_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "heic", "heif"]);
 
 function normalizeMembers(value: unknown): Member[] {
   if (!Array.isArray(value)) return [];
@@ -1385,6 +1389,26 @@ export default function Home() {
   }
 
   async function handleUploadMemberAvatar(memberId: string, file: File) {
+    if (!memberId) {
+      setStatusMessage("画像アップロードエラー: メンバーIDが未確定です。");
+      return;
+    }
+
+    if (!file) {
+      setStatusMessage("ファイル選択エラー: 画像ファイルを選択してください。");
+      return;
+    }
+
+    if (file.size > AVATAR_MAX_SIZE_BYTES) {
+      setStatusMessage("画像サイズは10MB以下にしてください");
+      return;
+    }
+
+    if (file.type && !ALLOWED_AVATAR_TYPES.has(file.type)) {
+      setStatusMessage(`ファイル選択エラー: 対応していない形式です (${file.type})`);
+      return;
+    }
+
     const client: any = getSupabaseClient();
     if (!client) {
       setStatusMessage("Supabaseの接続設定がないため、更新できません。");
@@ -1393,49 +1417,60 @@ export default function Home() {
 
     setUploadingMemberId(memberId);
     try {
-      const safeFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const filePath = `players/${memberId}/${Date.now()}-${safeFileName || "avatar.jpg"}`;
+      const extension = file.name.split(".").pop()?.toLowerCase() || "jpg";
+      const safeExtension = ALLOWED_AVATAR_EXTENSIONS.has(extension) ? extension : "jpg";
+      const filePath = `players/${memberId}/${crypto.randomUUID()}.${safeExtension}`;
 
-      const { error: uploadError } = await client.storage.from("player-icons").upload(filePath, file, {
+      const { error: uploadError } = await client.storage.from(AVATAR_BUCKET).upload(filePath, file, {
+        cacheControl: "3600",
         upsert: true,
-        contentType: file.type || undefined,
+        contentType: file.type || "image/jpeg",
       });
 
       if (uploadError) {
-        console.error("member avatar upload error:", {
+        console.error("avatar upload failed:", {
+          stage: "storage-upload",
           message: uploadError.message,
           name: uploadError.name,
           cause: uploadError.cause,
         });
-        setStatusMessage(`画像アップロードエラー: ${uploadError.message}`);
+        setStatusMessage(`Storageアップロードエラー: ${uploadError.message}`);
         return;
       }
 
-      const { data: publicData } = client.storage.from("player-icons").getPublicUrl(filePath);
+      const { data: publicData } = client.storage.from(AVATAR_BUCKET).getPublicUrl(filePath);
       const avatarUrl = publicData?.publicUrl;
       if (!avatarUrl) {
-        setStatusMessage("画像URLの取得に失敗しました。");
+        console.error("avatar upload failed:", {
+          stage: "public-url",
+          message: "publicUrl is empty",
+        });
+        setStatusMessage("公開URL取得エラー: バケット公開設定またはファイルパスを確認してください。");
         return;
       }
 
       const { error: updateError } = await client.from("members").update({ avatar_url: avatarUrl }).eq("id", memberId);
       if (updateError) {
-        console.error("update member avatar error:", {
+        console.error("avatar upload failed:", {
+          stage: "members-update",
           message: updateError.message,
           code: updateError.code,
           details: updateError.details,
           hint: updateError.hint,
         });
-        setStatusMessage(`アイコン更新エラー: ${updateError.message}`);
+        setStatusMessage(`members更新エラー: ${updateError.message}`);
         return;
       }
 
       await refreshMembers();
       setStatusMessage("プレイヤーアイコンを更新しました。");
     } catch (caughtError) {
-      console.error("member avatar upload thrown error:", caughtError);
+      console.error("avatar upload failed:", {
+        stage: "unexpected",
+        error: caughtError,
+      });
       const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
-      setStatusMessage(`アイコン更新エラー: ${message}`);
+      setStatusMessage(`画像アップロードエラー: ${message}`);
     } finally {
       setUploadingMemberId(null);
       const input = memberPhotoInputRefs.current[memberId];
@@ -1445,7 +1480,10 @@ export default function Home() {
 
   function handleMemberAvatarInputChange(memberId: string, event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    if (!file) return;
+    if (!file) {
+      setStatusMessage("ファイル選択エラー: 画像ファイルを選択してください。");
+      return;
+    }
     void handleUploadMemberAvatar(memberId, file);
   }
 
@@ -2171,7 +2209,7 @@ export default function Home() {
                                   memberPhotoInputRefs.current[member.id] = node;
                                 }}
                                 type="file"
-                                accept="image/*"
+                                accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
                                 onChange={(event) => handleMemberAvatarInputChange(member.id, event)}
                                 className="sr-only"
                               />
