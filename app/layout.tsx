@@ -33,12 +33,7 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="nan-logo-safe min-h-full flex flex-col">
-        <div className="nan-logo-fixed" aria-hidden="true">
-          <img src="/logo-nan.png" alt="南ロゴ" className="nan-logo-image" />
-        </div>
-        {children}
-      </body>
+      <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
 }

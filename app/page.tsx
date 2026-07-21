@@ -1945,9 +1945,14 @@ export default function Home() {
       <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-3 pb-28 pt-0 sm:px-4">
         <header className="sticky top-0 z-30 border-b border-[#2b2b2b] bg-[#111111] px-3 py-4 sm:px-4">
           <p className="text-[11px] font-semibold uppercase tracking-[0.35em] text-[#b91c1c]">Golf Tier</p>
-          <h1 className="mt-2 text-[28px] font-semibold text-[#f5e8e8] sm:text-[34px]" style={{ fontFamily: "Georgia, 'Times New Roman', serif" }}>
-            南高ゴルフ部Tier表
-          </h1>
+          <div className="app-header mt-2">
+            <div className="app-header__title">
+              <h1 className="app-header__title-main text-[28px] font-semibold text-[#f5e8e8] sm:text-[34px]" style={{ fontFamily: "Georgia, 'Times New Roman', serif" }}>
+                南高ゴルフ部Tier表
+              </h1>
+            </div>
+            <img src="/logo-nan.png" alt="南ロゴ" className="app-header__logo" />
+          </div>
         </header>
 
         <main className="flex-1 py-4">

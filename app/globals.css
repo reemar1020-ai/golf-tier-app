@@ -43,39 +43,35 @@ body {
   touch-action: manipulation;
 }
 
-.nan-logo-safe {
-  --nan-logo-reserved-right: 88px;
-  padding-right: var(--nan-logo-reserved-right);
+.app-header {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.nan-logo-fixed {
-  position: fixed;
-  top: calc(env(safe-area-inset-top) + 8px);
-  right: 12px;
-  z-index: 60;
-  pointer-events: none;
-  user-select: none;
+.app-header__title {
+  min-width: 0;
+  flex: 1;
 }
 
-.nan-logo-image {
-  height: 28px;
-  width: auto;
+.app-header__logo {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
   object-fit: contain;
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.18));
 }
 
-@media (min-width: 768px) {
-  .nan-logo-safe {
-    --nan-logo-reserved-right: 108px;
+@media (max-width: 640px) {
+  .app-header__logo {
+    width: 30px;
+    height: 30px;
   }
 
-  .nan-logo-fixed {
-    top: 12px;
-    right: 16px;
-  }
-
-  .nan-logo-image {
-    height: 36px;
+  .app-header__title-main {
+    font-size: 26px;
   }
 }
 
