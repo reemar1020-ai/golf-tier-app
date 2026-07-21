@@ -2666,8 +2666,9 @@ export default function Home() {
 
                                 {isEditing ? (
                                   <div className="mt-3 space-y-3">
-                                    <div className="flex justify-end">
-                                      <button type="button" onClick={() => handleSaveRoundGroup(group)} className="h-10 rounded-full bg-[#111111] px-4 text-sm font-semibold text-white">保存</button>
+                                    <div className="flex flex-nowrap items-center justify-end gap-2">
+                                      <button type="button" onClick={() => handleDeleteRoundGroup(group)} className="h-11 min-w-[72px] whitespace-nowrap rounded-full bg-[#dc2626] px-4 text-sm font-semibold text-white">削除</button>
+                                      <button type="button" onClick={() => handleSaveRoundGroup(group)} className="h-11 min-w-[72px] whitespace-nowrap rounded-full bg-[#111111] px-4 text-sm font-semibold text-white">保存</button>
                                     </div>
                                     <label className="block min-w-0 text-sm font-medium text-[#111111]">
                                       ゴルフ場
@@ -2779,10 +2780,6 @@ export default function Home() {
                                           </div>
                                         </div>
                                       ))}
-                                    </div>
-
-                                    <div className="flex flex-wrap gap-2">
-                                      <button type="button" onClick={() => handleDeleteRoundGroup(group)} className="h-10 rounded-full bg-[#dc2626] px-4 text-sm font-semibold text-white">削除</button>
                                     </div>
                                   </div>
                                 ) : null}
